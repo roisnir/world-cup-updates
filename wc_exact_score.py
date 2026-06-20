@@ -386,6 +386,14 @@ def _vol_compact(v):
     return f"${v / 1000:.1f}k" if v >= 1000 else f"${v:,.0f}"
 
 
+def _rtl_line(text):
+    """Right-align an all-LTR line inside an RTL message. The leading RLM (U+200F)
+    makes the line's base direction RTL (so Telegram right-aligns it); the LTR
+    isolate (U+2066..U+2069) keeps the inner token order intact (e.g.
+    '2-1 — 11.5% · $34k', not reversed)."""
+    return "‏⁦" + text + "⁩"
+
+
 def _flag_from_iso(iso2):
     """ISO-3166 alpha-2 -> regional-indicator flag emoji, e.g. 'NL' -> 🇳🇱."""
     return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in iso2)
@@ -513,7 +521,7 @@ def format_game_hebrew(game, top):
     for r in concrete[:top]:
         prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
         sc = (score_digits(r["scoreline"]) or "אחר").replace(" ", "")
-        lines.append(f"• {sc} — {prob} · {_vol_compact(r['volume'])}")
+        lines.append(_rtl_line(f"• {sc} — {prob} · {_vol_compact(r['volume'])}"))
     leader = max(concrete, key=lambda r: r["volume"])
     lsc = (score_digits(leader["scoreline"]) or "אחר").replace(" ", "")
     fav = favored_team(home, away, leader["scoreline"])

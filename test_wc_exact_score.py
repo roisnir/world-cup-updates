@@ -206,6 +206,12 @@ class FlowTest(unittest.TestCase):
         self.assertIn("🇳🇱", favour)                             # ...home (2-1), shown as flag only
         self.assertNotIn("Netherlands", favour)                 # country name dropped from לטובת
         self.assertIn(">#</a>", block)                          # inline single-char link
+        # the all-LTR prediction lines are RTL-aligned (lead with RLM) so they
+        # don't render left-aligned amid the Hebrew
+        pred = [ln for ln in block.split("\n") if "%" in ln and "·" in ln]
+        self.assertTrue(pred)
+        self.assertTrue(all(ln.startswith("‏⁦") and ln.endswith("⁩")
+                            for ln in pred))
 
     # 2) Telegram flow: real Hebrew message, Jerusalem time, both sections, payload shape.
     def test_telegram_hebrew_message(self):
