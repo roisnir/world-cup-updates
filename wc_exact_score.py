@@ -13,9 +13,10 @@ market. The *Yes* price is the implied probability of that exact scoreline (i.e.
 "most likely"); the market *volume* is how much money has been traded on it.
 
 Usage:
-    python wc_exact_score.py                      # next 24h, sort by volume
-    python wc_exact_score.py --sort price         # rank by implied probability (most likely)
+    python wc_exact_score.py                      # next 24h, ranked by probability (default)
+    python wc_exact_score.py --sort volume        # rank by money traded instead
     python wc_exact_score.py --hours 12 --top 8
+    python wc_exact_score.py --no-results         # skip the recent-results section
     python wc_exact_score.py --debug              # show what the API actually returns
     python wc_exact_score.py --json results.json  # also dump raw results
     python wc_exact_score.py --telegram           # ALSO push to a Telegram channel
@@ -85,6 +86,21 @@ TELEGRAM_MAX_CHARS = 4096                                        # Telegram per-
 EXACT_SCORE_TYPES = {"scores", "exact_score", "exact-score", "correct_score", "correctscore"}
 SCORELINE_RE = re.compile(r"^\s*\d+\s*[-–:]\s*\d+\s*$")          # "2-1", "0 - 0"
 EXACT_SCORE_TEXT_RE = re.compile(r"exact\s*score|correct\s*score", re.IGNORECASE)
+SCORE_DIGITS_RE = re.compile(r"(\d+)\s*[-–:]\s*(\d+)")           # pull "0 - 1" out of any label
+EXACT_SCORE_SUFFIX_RE = re.compile(r"\s*[-–]\s*Exact Score\s*$", re.IGNORECASE)
+
+# Display timezone for the Telegram message. zoneinfo is stdlib (3.9+) and reads
+# the OS tz database, so `requests` stays the only pip dependency. If the tz data
+# is missing (rare on Linux; possible on bare Windows -> `pip install tzdata`),
+# fall back to a fixed +03:00, correct for the World Cup window (Israel summer/IDT).
+def _jerusalem_tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("Asia/Jerusalem")
+    except Exception:
+        return timezone(timedelta(hours=3))
+
+JERUSALEM_TZ = _jerusalem_tz()
 
 
 def iso_z(dt: datetime) -> str:
@@ -128,25 +144,29 @@ def parse_json_field(value, default):
         return default
 
 
-def fetch_events(session, tag_slug, end_after, page_size=100):
+def fetch_events(session, tag_slug, end_date_min, closed=False, active=True, page_size=100):
     """
     Page through GET /events for a tag. We do NOT filter on start_date here:
     for sports, an event's startDate is when the market OPENED (often well in
     the past), so a start_date_min filter would wrongly drop upcoming games.
-    Instead we keep events that end after `end_after` (drops finished games)
-    and filter on real kickoff time client-side.
+    Real kickoff time is filtered client-side.
+
+    `closed=False` keeps upcoming/live events (end_date_min=now drops finished
+    games). `closed=True` fetches resolved events for the recent-results lookup
+    (pass end_date_min = now - window to bound how far back we page).
     """
     events, offset = [], 0
     while True:
         params = {
             "tag_slug": tag_slug,
             "related_tags": "true",
-            "closed": "false",
-            "active": "true",
-            "end_date_min": iso_z(end_after),   # keep upcoming/live, drop finished
+            "closed": "true" if closed else "false",
+            "end_date_min": iso_z(end_date_min),
             "limit": page_size,
             "offset": offset,
         }
+        if active is not None:
+            params["active"] = "true" if active else "false"
         batch = get_json(session, f"{GAMMA}/events", params=params)
         if not batch:
             break
@@ -231,6 +251,85 @@ def collect_exact_scores(event):
     return rows
 
 
+def clean_title(title):
+    """Drop the ' - Exact Score' suffix so a heading reads as just the fixture."""
+    return EXACT_SCORE_SUFFIX_RE.sub("", str(title or "")).strip()
+
+
+def score_digits(label):
+    """Pull the bare 'H - A' out of a scoreline label, e.g.
+    'Netherlands 0 - 1 Sweden' -> '0 - 1'. None if the label has no score
+    (the 'Any Other Score' bucket)."""
+    m = SCORE_DIGITS_RE.search(str(label or ""))
+    return f"{m.group(1)} - {m.group(2)}" if m else None
+
+
+def finished_result(event):
+    """For a CLOSED exact-score event, the market that resolved to Yes (price ≈ 1)
+    is the actual final score. Returns the winning market's full label
+    (e.g. 'Türkiye 0 - 1 Paraguay', or the 'Any Other Score' bucket), or None if
+    nothing resolved yet / it isn't an exact-score event."""
+    for m in event.get("markets") or []:
+        if not is_exact_score_market(m):
+            continue
+        yp = yes_price(m)
+        if yp is not None and yp >= 0.9:
+            return scoreline_label(m)
+    return None
+
+
+def fmt_jerusalem(dt):
+    """Format a UTC datetime in Israel local time, e.g. '20/06 20:00'."""
+    return dt.astimezone(JERUSALEM_TZ).strftime("%d/%m %H:%M")
+
+
+def build_games(events, now, start_max, sort):
+    """Upcoming events with exact-score markets kicking off in (now, start_max],
+    each with its scorelines ranked by `sort` ('price' or 'volume')."""
+    games = []
+    for ev in events:
+        ks = event_kickoff(ev)
+        if ks is None or not (now <= ks <= start_max):
+            continue
+        scores = collect_exact_scores(ev)
+        if not scores:
+            continue
+        scores.sort(reverse=True,
+                    key=lambda r: r["volume"] if sort == "volume" else (r["yes_price"] or -1.0))
+        games.append({
+            "title": clean_title(ev.get("title") or ev.get("slug")),
+            "slug": ev.get("slug"),
+            "kickoff_utc": iso_z(ks),
+            "kickoff_il": fmt_jerusalem(ks),
+            "scores": scores,
+        })
+    games.sort(key=lambda g: g["kickoff_utc"])
+    return games
+
+
+def build_results(events, start_min, now):
+    """Finished matches that kicked off in [start_min, now], with the real final
+    score derived from whichever exact-score market resolved to Yes."""
+    results = []
+    for ev in events:
+        ks = event_kickoff(ev)
+        if ks is None or not (start_min <= ks <= now):
+            continue
+        label = finished_result(ev)
+        if not label:
+            continue
+        results.append({
+            "title": clean_title(ev.get("title") or ev.get("slug")),
+            "slug": ev.get("slug"),
+            "kickoff_utc": iso_z(ks),
+            "kickoff_il": fmt_jerusalem(ks),
+            "result_label": label,
+            "score": score_digits(label),
+        })
+    results.sort(key=lambda r: r["kickoff_utc"], reverse=True)   # most recent first
+    return results
+
+
 def load_env_file(path):
     """
     Minimal `.env` loader (KEY=VALUE per line, # comments allowed). Existing
@@ -258,28 +357,61 @@ def load_env_file(path):
     return set_count
 
 
-def format_game_html(game, top):
-    """Render one game as a Telegram-HTML block. Only & < > need escaping in
-    HTML parse mode, so this is far less fiddly than MarkdownV2."""
-    # Text content only needs & < > escaped; quotes are fine unescaped (and
-    # read cleaner, e.g. "Côte d'Ivoire"). The slug also lands in an href, but
-    # Polymarket slugs are URL-safe so quote-escaping it is moot.
-    title = html.escape(str(game["title"]), quote=False)
-    slug = html.escape(str(game["slug"]))
-    kickoff = html.escape(str(game["kickoff_utc"]), quote=False)
+HE_HEADER = "מונדיאל ⚽ — מה מהמרים בפולימרקט"
+
+# In Telegram-HTML only & < > need escaping; quotes read cleaner left alone
+# (e.g. "Côte d'Ivoire"). Slugs are URL-safe so the href needs no quote-escaping.
+def _esc(text):
+    return html.escape(str(text), quote=False)
+
+
+def _vol_compact(v):
+    """13509.0 -> '$13.5k'; 980 -> '$980'."""
+    return f"${v / 1000:.1f}k" if v >= 1000 else f"${v:,.0f}"
+
+
+def format_game_hebrew(game, top):
+    """One upcoming game as a Hebrew Telegram-HTML block: fixture, Israel-local
+    kickoff, the most-likely scorelines, and where the money is."""
+    slug = html.escape(str(game["slug"]))                       # href value -> full escape
     lines = [
-        f"⚽ <b>{title}</b>",
-        f"kickoff {kickoff}",
-        f'<a href="https://polymarket.com/event/{slug}">polymarket.com/event/{slug}</a>',
+        f"<b>{_esc(game['title'])}</b>",
+        f"🕒 {_esc(game['kickoff_il'])} (שעון ישראל)",
     ]
     for r in game["scores"][:top]:
-        prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "n/a"
-        score = html.escape(str(r["scoreline"]), quote=False)
-        lines.append(f"• <code>{score}</code> — prob {prob}, vol ${r['volume']:,.0f}")
+        prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
+        sc = score_digits(r["scoreline"]) or "תוצאה אחרת"
+        lines.append(f"• {_esc(sc)} — {prob} · {_vol_compact(r['volume'])}")
     money_leader = max(game["scores"], key=lambda r: r["volume"])
-    leader = html.escape(str(money_leader["scoreline"]), quote=False)
-    lines.append(f"→ most money on: {leader} (${money_leader['volume']:,.0f})")
+    ml = score_digits(money_leader["scoreline"]) or "תוצאה אחרת"
+    lines.append(f"💰 הכי הרבה כסף על {_esc(ml)}")
+    lines.append(f'🔗 <a href="https://polymarket.com/event/{slug}">פולימרקט</a>')
     return "\n".join(lines)
+
+
+def format_results_hebrew(results, hours):
+    """The recent finished matches and their real final scores, as one block."""
+    lines = [f"✅ <b>תוצאות מה-{hours:g} השעות האחרונות</b>"]
+    for r in results:
+        if r["score"]:                                          # numeric scoreline known
+            lines.append(f"• {_esc(r['result_label'])}")
+        else:                                                   # 'Any Other Score' won
+            lines.append(f"• {_esc(clean_title(r['title']))} — תוצאה אחרת")
+    return "\n".join(lines)
+
+
+def telegram_blocks(games, results, top, hours):
+    """Assemble the full Hebrew message as a list of blocks for pack_blocks()."""
+    blocks = []
+    head = [f"<b>{_esc(HE_HEADER)}</b>"]
+    if games:
+        head.append(f"🔮 <b>{hours:g} השעות הקרובות — התוצאות הסבירות</b>")
+    blocks.append("\n".join(head))
+    for g in games:
+        blocks.append(format_game_hebrew(g, top))
+    if results:
+        blocks.append(format_results_hebrew(results, hours))
+    return blocks
 
 
 def pack_blocks(blocks, limit=TELEGRAM_MAX_CHARS, sep="\n\n"):
@@ -336,15 +468,18 @@ def send_telegram(session, messages, token, chat_id, parse_mode="HTML"):
             raise RuntimeError("Telegram API error: still rate-limited after 3 attempts")
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="Polymarket World Cup exact-score odds for upcoming games.")
     ap.add_argument("--hours", type=float, default=24.0, help="Look-ahead window in hours (default 24).")
     ap.add_argument("--tag", default="fifa-world-cup",
                     help="Gamma tag slug (default 'fifa-world-cup' — the tag that carries "
                          "individual match markets; 'world-cup' holds only tournament futures).")
-    ap.add_argument("--sort", choices=("volume", "price"), default="volume",
-                    help="Rank scorelines by 'volume' (money) or 'price' (probability / most likely).")
+    ap.add_argument("--sort", choices=("volume", "price"), default="price",
+                    help="Rank scorelines by 'price' (probability / most likely, default) or 'volume' (money).")
     ap.add_argument("--top", type=int, default=5, help="Show top N scorelines per game (default 5).")
+    ap.add_argument("--results", action=argparse.BooleanOptionalAction, default=True,
+                    help="Include a section of real final scores from the matching window in the "
+                         "recent past (default on; use --no-results to skip the extra fetch).")
     ap.add_argument("--json", metavar="PATH", help="Optional path to dump raw results as JSON.")
     ap.add_argument("--telegram", action="store_true",
                     help="Also push the ranked output to a Telegram channel "
@@ -356,7 +491,7 @@ def main():
     ap.add_argument("--env-file", default=default_env, metavar="PATH",
                     help="Path to a .env file with secrets (default: .env next to this script).")
     ap.add_argument("--debug", action="store_true", help="Print diagnostics about what the API returns.")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     loaded = load_env_file(args.env_file)
     if args.debug and loaded:
@@ -389,9 +524,10 @@ def main():
 
     now = datetime.now(timezone.utc)
     start_max = now + timedelta(hours=args.hours)
+    start_min = now - timedelta(hours=args.hours)               # results look-back window
 
     try:
-        events = fetch_events(session, args.tag, end_after=now)
+        events = fetch_events(session, args.tag, end_date_min=now, closed=False, active=True)
     except requests.RequestException as exc:
         print(f"ERROR fetching events: {exc}", file=sys.stderr)
         return 1
@@ -414,60 +550,58 @@ def main():
               f"{sorted(seen_types) if seen_types else '(none)'}")
         print(f"[debug] window: {iso_z(now)} .. {iso_z(start_max)}\n")
 
-    games = []
-    for ev in events:
-        ks = event_kickoff(ev)
-        if ks is None or not (now <= ks <= start_max):
-            continue
-        scores = collect_exact_scores(ev)
-        if not scores:
-            continue
-        key = (lambda r: (r["volume"] if args.sort == "volume" else (r["yes_price"] or -1.0)))
-        scores.sort(key=key, reverse=True)
-        # Exact-score markets live in a dedicated event titled "X vs. Y - Exact Score";
-        # drop that suffix so the heading reads as just the fixture.
-        title = ev.get("title") or ev.get("slug")
-        title = re.sub(r"\s*[-–]\s*Exact Score\s*$", "", title, flags=re.IGNORECASE)
-        games.append({"title": title,
-                      "slug": ev.get("slug"),
-                      "kickoff_utc": iso_z(ks),
-                      "scores": scores})
+    games = build_games(events, now, start_max, args.sort)
 
-    games.sort(key=lambda g: g["kickoff_utc"])
+    # Recent results: the same-length window in the past, from CLOSED events.
+    results = []
+    if args.results:
+        try:
+            past = fetch_events(session, args.tag,
+                                end_date_min=now - timedelta(hours=args.hours + 6),
+                                closed=True, active=None)
+            results = build_results(past, start_min, now)
+        except requests.RequestException as exc:
+            print(f"WARNING: could not fetch recent results: {exc}", file=sys.stderr)
 
-    if not games:
-        print(f"No World Cup games with exact-score markets kicking off in the next {args.hours:g}h.")
+    if not games and not results:
+        print(f"No World Cup exact-score markets in the ±{args.hours:g}h window around now.")
         print("If this seems wrong, re-run with --debug to see event counts, kickoff times,")
         print("and the sportsMarketType values the API is actually returning.")
         return 0
 
     label = "volume (money)" if args.sort == "volume" else "implied probability"
-    print(f"World Cup exact-score markets — next {args.hours:g}h — ranked by {label}\n")
-    for g in games:
-        print(f"=== {g['title']}   (kickoff {g['kickoff_utc']})")
-        print(f"    https://polymarket.com/event/{g['slug']}")
-        for r in g["scores"][:args.top]:
-            prob = f"{r['yes_price']*100:5.1f}%" if r["yes_price"] is not None else "   n/a"
-            print(f"    {r['scoreline']:<22} prob={prob}   vol=${r['volume']:,.0f}")
-        money_leader = max(g["scores"], key=lambda r: r["volume"])
-        print(f"    -> most money on: {money_leader['scoreline']} (${money_leader['volume']:,.0f})\n")
+    if games:
+        print(f"World Cup exact-score markets — next {args.hours:g}h — ranked by {label}\n")
+        for g in games:
+            print(f"=== {g['title']}   (kickoff {g['kickoff_utc']} | {g['kickoff_il']} IL)")
+            print(f"    https://polymarket.com/event/{g['slug']}")
+            for r in g["scores"][:args.top]:
+                prob = f"{r['yes_price']*100:5.1f}%" if r["yes_price"] is not None else "   n/a"
+                print(f"    {r['scoreline']:<28} prob={prob}   vol=${r['volume']:,.0f}")
+            money_leader = max(g["scores"], key=lambda r: r["volume"])
+            print(f"    -> most money on: {money_leader['scoreline']} (${money_leader['volume']:,.0f})\n")
+
+    if results:
+        print(f"Recent results — last {args.hours:g}h:")
+        for r in results:
+            shown = r["result_label"] if r["score"] else f"{clean_title(r['title'])} — Any Other Score"
+            print(f"    {shown}   (kickoff {r['kickoff_il']} IL)")
+        print()
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
-            json.dump(games, fh, indent=2)
+            json.dump({"games": games, "results": results}, fh, indent=2)
         print(f"Raw results written to {args.json}")
 
     if args.telegram:
-        header = (f"<b>World Cup exact-score</b> — next {args.hours:g}h — "
-                  f"ranked by {html.escape(label)}")
-        blocks = [header] + [format_game_html(g, args.top) for g in games]
-        messages = pack_blocks(blocks)
+        messages = pack_blocks(telegram_blocks(games, results, args.top, args.hours))
         try:
             send_telegram(session, messages, tg_token, tg_chat)
         except (requests.RequestException, RuntimeError) as exc:
             print(f"ERROR sending to Telegram: {exc}", file=sys.stderr)
             return 1
-        print(f"Sent {len(games)} game(s) to Telegram in {len(messages)} message(s).")
+        print(f"Sent to Telegram in {len(messages)} message(s) "
+              f"({len(games)} upcoming, {len(results)} result(s)).")
 
     return 0
 
