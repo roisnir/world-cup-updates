@@ -101,3 +101,49 @@ Notes:
 - `cd` into the repo so `./.env` is found (or pass `--env-file`).
 - A missing/invalid secret exits non-zero and logs to `wc.log`, so a
   misconfigured job surfaces immediately rather than failing silently.
+
+## Run in Docker
+
+The image runs the script **once and exits** — you schedule it from the host
+(cron, a systemd timer, or a Kubernetes `CronJob`). This keeps the image small
+and the scheduling where the OS already does it well. Build it once:
+
+```bash
+docker build -t wc-alerts .
+```
+
+Send a single alert — mount your `.env` read-only where the script looks for it:
+
+```bash
+docker run --rm -v "$PWD/.env:/app/.env:ro" wc-alerts --telegram --hours 2
+```
+
+Everything after the image name is passed straight to `wc_exact_score.py`, so
+`--test-telegram`, `--no-results`, `--debug`, etc. all work. (The default command
+is `--telegram --hours 2`.) You can also pass the secrets inline instead of
+mounting a file — the script reads them from the environment:
+
+```bash
+docker run --rm \
+  -e TELEGRAM_BOT_TOKEN=123456:ABC... \
+  -e TELEGRAM_CHAT_ID=@yourchannel \
+  wc-alerts --telegram --hours 2
+```
+
+### Schedule it with host cron
+
+Every 30 minutes, alert on games kicking off within the next 2 hours:
+
+```cron
+*/30 * * * * docker run --rm -v /opt/wc/.env:/app/.env:ro wc-alerts --telegram --hours 2 >> /var/log/wc-alerts.log 2>&1
+```
+
+Notes:
+
+- Use an **absolute** path for the mounted `.env` — cron has no `$PWD`.
+- Each fire is a fresh, short-lived container (`--rm` cleans it up); no
+  long-running daemon or `--restart` policy to manage.
+- A missing/invalid secret exits non-zero, so a misconfigured job surfaces in
+  the log rather than failing silently. With nothing to report the run is quiet.
+- The schedule fires in the **host's** timezone; kickoff times in the message
+  are always shown in Israel time regardless.
