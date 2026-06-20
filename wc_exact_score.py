@@ -522,7 +522,10 @@ def format_game_hebrew(game, top):
     concrete = specific_scores(game["scores"])                  # drop 'Any Other Score' before top-N
     home, away = split_teams(game["title"])
     # Fixture (with flags) and kickoff on one line; tz is obvious in context.
-    lines = [f"<b>{team_label(home)} vs. {team_label(away)}</b> · {_esc(game['kickoff_il'])}"]
+    # LTR-isolate it like the score lines below so home stays on the LEFT in both:
+    # otherwise the Hebrew names make the header lay out RTL (home on the right)
+    # while the LTR score digits keep home on the left, and the two look reversed.
+    lines = [_rtl_line(f"<b>{team_label(home)} vs. {team_label(away)}</b> · {_esc(game['kickoff_il'])}")]
     for r in concrete[:top]:
         prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
         sc = (score_digits(r["scoreline"]) or "אחר").replace(" ", "")
@@ -538,16 +541,21 @@ def format_game_hebrew(game, top):
 
 
 def format_results_body(results):
-    """Just the result lines (no header): '🇹🇷 טורקיה 0 - 1 פרגוואי 🇵🇾'."""
+    """Just the result lines (no header): '🇹🇷 טורקיה 0 - 1 פרגוואי 🇵🇾'.
+
+    LTR-isolated like the prediction lines so home stays on the LEFT and its
+    score on the left too — otherwise the Hebrew names lay the line out RTL
+    (home on the right) while the score digits keep home on the left, and team
+    order looks reversed against its own score (and against the predictions)."""
     lines = []
     for r in results:
         home, away = split_teams(r["title"])
         fh, fa = team_flag(home), team_flag(away)
         if r["score"]:                                          # numeric scoreline known
             he = f"{_esc(team_he(home))} {r['score']} {_esc(team_he(away))}"
-            lines.append("• " + " ".join(filter(None, [fh, he, fa])))
+            lines.append(_rtl_line("• " + " ".join(filter(None, [fh, he, fa]))))
         else:                                                   # 'Any Other Score' won
-            lines.append(f"• {team_label(home)} vs. {team_label(away)} — תוצאה אחרת")
+            lines.append(_rtl_line(f"• {team_label(home)} vs. {team_label(away)} — תוצאה אחרת"))
     return "\n".join(lines)
 
 
