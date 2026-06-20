@@ -52,6 +52,39 @@ def exact_event(title, slug, kickoff, scorelines, closed):
     }
 
 
+def moneyline_market(group_title, yes, vol, kickoff):
+    """One Yes/No side of the 3-way match-winner market (home/draw/away)."""
+    yes = float(yes)
+    return {
+        "groupItemTitle": group_title,
+        "outcomes": json.dumps(["Yes", "No"]),
+        "outcomePrices": json.dumps([str(yes), str(round(1.0 - yes, 4))]),
+        "volume": vol,
+        "sportsMarketType": "moneyline",
+        "question": f"Will {group_title} win?",
+        "gameStartTime": kickoff,
+        "closed": False,
+        "slug": "ml-" + group_title.replace(" ", "-"),
+    }
+
+
+def moneyline_event(home, away, slug, kickoff, home_yes, draw_yes, away_yes):
+    """A bare 'X vs. Y' moneyline event — the SEPARATE event Polymarket uses for the
+    match-winner odds, distinct from the '... - Exact Score' event for the same game.
+    The draw side is named 'Draw (X vs. Y)'; sides are deliberately NOT in home/draw/
+    away order so the name-matching logic is exercised."""
+    return {
+        "title": f"{home} vs. {away}",
+        "slug": slug,
+        "gameStartTime": kickoff,
+        "markets": [
+            moneyline_market(f"Draw ({home} vs. {away})", draw_yes, 1000, kickoff),
+            moneyline_market(away, away_yes, 2000, kickoff),
+            moneyline_market(home, home_yes, 3000, kickoff),
+        ],
+    }
+
+
 def futures_event(kickoff):
     """A tournament-futures event with NO exact-score markets (must be ignored)."""
     return {
@@ -219,11 +252,74 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(all(any("֐" <= ch <= "׿" for ch in ln)
                             for ln in pred))                    # Hebrew char present
 
+    # 1e) Match-winner (moneyline) odds: the separate 'X vs. Y' moneyline event is
+    #     matched to the same fixture's exact-score game and its home/draw/away
+    #     probabilities surface in both the Hebrew block and the stdout breakdown.
+    def test_moneyline_odds_attached_and_rendered(self):
+        from datetime import timedelta
+        upcoming = [
+            exact_event("Netherlands vs. Sweden", "nl-se-exact-score", self.kick_future,
+                        [("Netherlands 2 - 1 Sweden", 0.30, 9000),
+                         ("Netherlands 1 - 1 Sweden", 0.20, 1000)], closed=False),
+            # The moneyline lives in its OWN event (bare title), separate from above.
+            moneyline_event("Netherlands", "Sweden", "nl-se", self.kick_future,
+                            home_yes=0.56, draw_yes=0.24, away_yes=0.20),
+        ]
+        self.install(upcoming, [])
+
+        # build_games attaches the odds to the exact-score game by (title, kickoff).
+        games = wc.build_games(upcoming, self.now, self.now + timedelta(hours=24))
+        self.assertEqual(len(games), 1)                         # moneyline event has no scores
+        ml = games[0]["moneyline"]
+        self.assertIsNotNone(ml)
+        self.assertAlmostEqual(ml["home_prob"], 0.56)
+        self.assertAlmostEqual(ml["draw_prob"], 0.24)
+        self.assertAlmostEqual(ml["away_prob"], 0.20)
+        self.assertEqual((ml["home"], ml["away"]), ("Netherlands", "Sweden"))
+
+        # Hebrew block: a 🏆 line with each flag glued to its win%, draw as 'תיקו'.
+        block = wc.format_game_hebrew(games[0], 5)
+        ml_lines = [ln for ln in block.split("\n") if "🏆" in ln]
+        self.assertEqual(len(ml_lines), 1)
+        ml_line = ml_lines[0]
+        self.assertIn("🇳🇱 56%", ml_line)                       # home flag + win%
+        self.assertIn("תיקו 24%", ml_line)                      # draw labelled in Hebrew
+        self.assertIn("🇸🇪 20%", ml_line)                       # away flag + win%
+        self.assertTrue(any("֐" <= ch <= "׿" for ch in ml_line))  # carries Hebrew (RTL anchor)
+        # the odds line sits directly under the fixture header, before the scorelines
+        self.assertEqual(block.split("\n")[1], ml_line)
+
+        # stdout breakdown carries the English moneyline line too.
+        rc, out = self.run_main(["--hours", "24", "--no-results"])
+        self.assertEqual(rc, 0)
+        self.assertIn("moneyline: Netherlands 56% / Draw 24% / Sweden 20%", out)
+
+    # 1f) No moneyline event for the fixture -> odds omitted gracefully: no crash,
+    #     no 🏆 line, no stray 'moneyline:' label, scorelines still render.
+    def test_missing_moneyline_omitted_gracefully(self):
+        from datetime import timedelta
+        upcoming = [exact_event("Alpha vs. Beta", "alpha-beta-exact-score", self.kick_future,
+                                [("Alpha 2 - 1 Beta", 0.30, 9000),
+                                 ("Alpha 1 - 1 Beta", 0.20, 1000)], closed=False)]
+        self.install(upcoming, [])
+        games = wc.build_games(upcoming, self.now, self.now + timedelta(hours=24))
+        self.assertIsNone(games[0]["moneyline"])
+        block = wc.format_game_hebrew(games[0], 5)
+        self.assertNotIn("🏆", block)                            # no odds line at all
+        rc, out = self.run_main(["--hours", "24", "--no-results"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("moneyline:", out)                     # no empty/partial label
+        self.assertIn("Alpha 2 - 1 Beta", out)                  # scorelines unaffected
+
     # 2) Telegram flow: real Hebrew message, Jerusalem time, both sections, payload shape.
     def test_telegram_hebrew_message(self):
-        upcoming = [exact_event("Alpha vs. Beta", "alpha-beta-exact-score", self.kick_future,
-                                [("Alpha 2 - 1 Beta", 0.30, 5000),
-                                 ("Alpha 1 - 1 Beta", 0.20, 9000)], closed=False)]
+        upcoming = [
+            exact_event("Netherlands vs. Sweden", "nl-se-exact-score", self.kick_future,
+                        [("Netherlands 2 - 1 Sweden", 0.30, 5000),
+                         ("Netherlands 1 - 1 Sweden", 0.20, 9000)], closed=False),
+            moneyline_event("Netherlands", "Sweden", "nl-se", self.kick_future,
+                            home_yes=0.56, draw_yes=0.24, away_yes=0.20),
+        ]
         finished = [exact_event("Gamma vs. Delta", "gamma-delta-exact-score", self.kick_past,
                                 [("Gamma 3 - 0 Delta", 1.0, 4000),
                                  ("Gamma 0 - 0 Delta", 0.0, 100)], closed=True)]
@@ -244,6 +340,8 @@ class FlowTest(unittest.TestCase):
         self.assertIn(wc.fmt_jerusalem(self.now + timedelta(hours=3)), text)  # Israel-local kickoff
         self.assertIn("תוצאות", text)                           # results subheader
         self.assertIn("Gamma 3 - 0 Delta", text)                # real final score (centered)
+        self.assertIn("🏆", text)                                # match-winner odds line present
+        self.assertIn("תיקו 24%", text)                          # draw odds (RTL-anchored)
         self.assertLessEqual(len(p["text"]), wc.TELEGRAM_MAX_CHARS)
 
     # 3) Results derivation: winning (Yes≈1) market becomes the score; unresolved is skipped.
