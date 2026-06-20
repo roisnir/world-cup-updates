@@ -13,8 +13,7 @@ market. The *Yes* price is the implied probability of that exact scoreline (i.e.
 "most likely"); the market *volume* is how much money has been traded on it.
 
 Usage:
-    python wc_exact_score.py                      # next 24h, ranked by probability (default)
-    python wc_exact_score.py --sort volume        # rank by money traded instead
+    python wc_exact_score.py                      # next 24h, most-likely exact scores
     python wc_exact_score.py --hours 12 --top 8
     python wc_exact_score.py --no-results         # skip the recent-results section
     python wc_exact_score.py --debug              # show what the API actually returns
@@ -46,7 +45,7 @@ Telegram (pre-kickoff alerts):
 Dependencies: requests  (pip install requests)
 
 --------------------------------------------------------------------------
-Example output  (python wc_exact_score.py --sort price --top 5)
+Example output  (python wc_exact_score.py --top 5)
 Numbers are illustrative — the top row is the SINGLE MOST LIKELY scoreline.
 --------------------------------------------------------------------------
 World Cup exact-score markets — next 24h — ranked by implied probability
@@ -292,19 +291,18 @@ def specific_scores(scores):
     return concrete or scores
 
 
-def score_sort_key(row, sort):
-    """Sort key (used with reverse=True). For 'price': most likely first, ties
-    broken by money. Price is rounded to the displayed precision (1 decimal of a
-    percent = 3 decimals of price) so two scorelines that *show* the same
-    percentage are treated as a genuine tie and ordered by volume."""
+def score_sort_key(row):
+    """Sort key (used with reverse=True): most likely first, ties broken by money.
+    Price is rounded to the displayed precision (1 decimal of a percent = 3
+    decimals of price) so two scorelines that *show* the same percentage are
+    treated as a genuine tie and ordered by volume."""
     price = row["yes_price"] if row["yes_price"] is not None else -1.0
-    price = round(price, 3)
-    return (row["volume"], price) if sort == "volume" else (price, row["volume"])
+    return (round(price, 3), row["volume"])
 
 
-def build_games(events, now, start_max, sort):
+def build_games(events, now, start_max):
     """Upcoming events with exact-score markets kicking off in (now, start_max],
-    each with its scorelines ranked by `sort` ('price' or 'volume')."""
+    each with its scorelines ranked by probability (volume breaks ties)."""
     games = []
     for ev in events:
         ks = event_kickoff(ev)
@@ -313,7 +311,7 @@ def build_games(events, now, start_max, sort):
         scores = collect_exact_scores(ev)
         if not scores:
             continue
-        scores.sort(key=lambda r: score_sort_key(r, sort), reverse=True)
+        scores.sort(key=score_sort_key, reverse=True)
         games.append({
             "title": clean_title(ev.get("title") or ev.get("slug")),
             "slug": ev.get("slug"),
@@ -483,7 +481,7 @@ def format_game_hebrew(game, top):
     lsc = (score_digits(leader["scoreline"]) or "אחר").replace(" ", "")
     fav = favored_team(home, away, leader["scoreline"])
     favour = f"לטובת {team_label(fav)}" if fav else "תיקו"
-    link = f'<a href="https://polymarket.com/event/{slug}">🔗</a>'
+    link = f'<a href="https://polymarket.com/event/{slug}">#</a>'
     lines.append(f"💰 הכי הרבה כסף על {lsc} ({favour}) {link}")
     return "\n".join(lines)
 
@@ -505,8 +503,6 @@ def telegram_blocks(games, results, top, hours):
     """Assemble the full Hebrew message as a list of blocks for pack_blocks()."""
     blocks = []
     head = [f"<b>{_esc(HE_HEADER)}</b>"]
-    if games:
-        head.append(f"🔮 <b>{hours:g} השעות הקרובות — התוצאות הסבירות</b>")
     blocks.append("\n".join(head))
     for g in games:
         blocks.append(format_game_hebrew(g, top))
@@ -515,7 +511,7 @@ def telegram_blocks(games, results, top, hours):
     return blocks
 
 
-def pack_blocks(blocks, limit=TELEGRAM_MAX_CHARS, sep="\n\n"):
+def pack_blocks(blocks, limit=TELEGRAM_MAX_CHARS, sep="\n"):
     """Pack rendered blocks into the fewest messages <= `limit` chars, never
     splitting a block across messages. A single oversize block is hard-split
     as a last resort so nothing is silently dropped."""
@@ -575,8 +571,6 @@ def main(argv=None):
     ap.add_argument("--tag", default="fifa-world-cup",
                     help="Gamma tag slug (default 'fifa-world-cup' — the tag that carries "
                          "individual match markets; 'world-cup' holds only tournament futures).")
-    ap.add_argument("--sort", choices=("volume", "price"), default="price",
-                    help="Rank scorelines by 'price' (probability / most likely, default) or 'volume' (money).")
     ap.add_argument("--top", type=int, default=5, help="Show top N scorelines per game (default 5).")
     ap.add_argument("--results", action=argparse.BooleanOptionalAction, default=True,
                     help="Include a section of real final scores from the matching window in the "
@@ -651,7 +645,7 @@ def main(argv=None):
               f"{sorted(seen_types) if seen_types else '(none)'}")
         print(f"[debug] window: {iso_z(now)} .. {iso_z(start_max)}\n")
 
-    games = build_games(events, now, start_max, args.sort)
+    games = build_games(events, now, start_max)
 
     # Recent results: the same-length window in the past, from CLOSED events.
     results = []
@@ -670,9 +664,8 @@ def main(argv=None):
         print("and the sportsMarketType values the API is actually returning.")
         return 0
 
-    label = "volume (money)" if args.sort == "volume" else "implied probability"
     if games:
-        print(f"World Cup exact-score markets — next {args.hours:g}h — ranked by {label}\n")
+        print(f"World Cup exact-score markets — next {args.hours:g}h — ranked by implied probability\n")
         for g in games:
             concrete = specific_scores(g["scores"])
             print(f"=== {g['title']}   (kickoff {g['kickoff_utc']} | {g['kickoff_il']} IL)")

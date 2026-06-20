@@ -19,8 +19,7 @@ minimal system without it (rare on Linux), `pip install tzdata`.
 ## Run locally (stdout)
 
 ```bash
-python wc_exact_score.py                  # next 24h, ranked by probability (default)
-python wc_exact_score.py --sort volume    # rank by money traded instead
+python wc_exact_score.py                  # next 24h, most-likely exact scores
 python wc_exact_score.py --hours 12 --top 8
 python wc_exact_score.py --no-results     # skip the recent-results section
 python wc_exact_score.py --debug          # diagnose what the API returns

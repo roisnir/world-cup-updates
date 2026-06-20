@@ -191,7 +191,7 @@ class FlowTest(unittest.TestCase):
         upcoming = [exact_event("Netherlands vs. Sweden", "nl-se-exact-score", self.kick_future,
                                 [("Netherlands 2 - 1 Sweden", 0.30, 9000),   # leader by volume
                                  ("Netherlands 1 - 1 Sweden", 0.20, 1000)], closed=False)]
-        games = wc.build_games(upcoming, self.now, self.now + timedelta(hours=24), "price")
+        games = wc.build_games(upcoming, self.now, self.now + timedelta(hours=24))
         block = wc.format_game_hebrew(games[0], 5)
         self.assertIn("🇳🇱", block)                              # home flag
         self.assertIn("🇸🇪", block)                              # away flag
@@ -200,7 +200,7 @@ class FlowTest(unittest.TestCase):
         self.assertIn("הכי הרבה כסף על 2-1", block)             # leader scoreline (9000 > 1000)
         self.assertIn("לטובת", block)                           # in favour of...
         self.assertIn("Netherlands", block.split("לטובת", 1)[1])  # ...home, since 2-1
-        self.assertIn(">🔗</a>", block)                         # inline single-char link
+        self.assertIn(">#</a>", block)                          # inline single-char link
 
     # 2) Telegram flow: real Hebrew message, Jerusalem time, both sections, payload shape.
     def test_telegram_hebrew_message(self):
