@@ -195,6 +195,9 @@ class FlowTest(unittest.TestCase):
         block = wc.format_game_hebrew(games[0], 5)
         self.assertIn("🇳🇱", block)                              # home flag
         self.assertIn("🇸🇪", block)                              # away flag
+        self.assertIn("הולנד", block)                           # Netherlands -> Hebrew
+        self.assertIn("שוודיה", block)                          # Sweden -> Hebrew
+        self.assertNotIn("Netherlands", block)                  # English name not shown
         self.assertIn(wc.fmt_jerusalem(self.now + timedelta(hours=3)), block)  # time inline
         self.assertNotIn("שעון ישראל", block)                   # tz hint dropped
         self.assertIn("הכי הרבה כסף על 2-1", block)             # leader scoreline (9000 > 1000)
