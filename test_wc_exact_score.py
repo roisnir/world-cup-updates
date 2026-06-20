@@ -184,6 +184,24 @@ class FlowTest(unittest.TestCase):
                                         "Alpha 1 - 0 Beta")]  # 100
         self.assertEqual(order, sorted(order))
 
+    # 1d) Hebrew block formatting: flags, inline time (no tz hint), money line with
+    #     the favoured team, and the single-char inline link.
+    def test_hebrew_block_formatting(self):
+        from datetime import timedelta
+        upcoming = [exact_event("Netherlands vs. Sweden", "nl-se-exact-score", self.kick_future,
+                                [("Netherlands 2 - 1 Sweden", 0.30, 9000),   # leader by volume
+                                 ("Netherlands 1 - 1 Sweden", 0.20, 1000)], closed=False)]
+        games = wc.build_games(upcoming, self.now, self.now + timedelta(hours=24), "price")
+        block = wc.format_game_hebrew(games[0], 5)
+        self.assertIn("🇳🇱", block)                              # home flag
+        self.assertIn("🇸🇪", block)                              # away flag
+        self.assertIn(wc.fmt_jerusalem(self.now + timedelta(hours=3)), block)  # time inline
+        self.assertNotIn("שעון ישראל", block)                   # tz hint dropped
+        self.assertIn("הכי הרבה כסף על 2-1", block)             # leader scoreline (9000 > 1000)
+        self.assertIn("לטובת", block)                           # in favour of...
+        self.assertIn("Netherlands", block.split("לטובת", 1)[1])  # ...home, since 2-1
+        self.assertIn(">#</a>", block)                          # inline single-char link
+
     # 2) Telegram flow: real Hebrew message, Jerusalem time, both sections, payload shape.
     def test_telegram_hebrew_message(self):
         upcoming = [exact_event("Alpha vs. Beta", "alpha-beta-exact-score", self.kick_future,

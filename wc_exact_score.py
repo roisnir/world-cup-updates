@@ -388,20 +388,103 @@ def _vol_compact(v):
     return f"${v / 1000:.1f}k" if v >= 1000 else f"${v:,.0f}"
 
 
+def _flag_from_iso(iso2):
+    """ISO-3166 alpha-2 -> regional-indicator flag emoji, e.g. 'NL' -> 🇳🇱."""
+    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in iso2)
+
+
+def _subdivision_flag(tag):
+    """England/Scotland/Wales flags use GB subdivision tag sequences."""
+    return "\U0001F3F4" + "".join(chr(0xE0000 + ord(c)) for c in tag) + "\U000E007F"
+
+
+# Polymarket team name -> ISO-3166 alpha-2. Covers the 2026 field and common
+# aliases; an unknown name just yields no flag (graceful).
+_TEAM_ISO = {
+    "Netherlands": "NL", "Sweden": "SE", "Germany": "DE", "Spain": "ES",
+    "Belgium": "BE", "France": "FR", "Portugal": "PT", "Italy": "IT",
+    "Croatia": "HR", "Switzerland": "CH", "Denmark": "DK", "Poland": "PL",
+    "Austria": "AT", "Serbia": "RS", "Ukraine": "UA", "Czechia": "CZ",
+    "Czech Republic": "CZ", "Türkiye": "TR", "Turkey": "TR", "Norway": "NO",
+    "Hungary": "HU", "Greece": "GR", "Romania": "RO", "Slovenia": "SI",
+    "Slovakia": "SK", "Albania": "AL", "Republic of Ireland": "IE", "Ireland": "IE",
+    "Iceland": "IS", "Finland": "FI", "Russia": "RU",
+    "Brazil": "BR", "Argentina": "AR", "Uruguay": "UY", "Colombia": "CO",
+    "Chile": "CL", "Peru": "PE", "Paraguay": "PY", "Ecuador": "EC",
+    "Bolivia": "BO", "Venezuela": "VE",
+    "United States": "US", "USA": "US", "Mexico": "MX", "Canada": "CA",
+    "Costa Rica": "CR", "Panama": "PA", "Honduras": "HN", "Jamaica": "JM",
+    "Haiti": "HT", "Curaçao": "CW", "El Salvador": "SV", "Guatemala": "GT",
+    "Trinidad and Tobago": "TT",
+    "Morocco": "MA", "Senegal": "SN", "Côte d'Ivoire": "CI", "Ivory Coast": "CI",
+    "Cameroon": "CM", "Ghana": "GH", "Nigeria": "NG", "Tunisia": "TN",
+    "Algeria": "DZ", "Egypt": "EG", "Mali": "ML", "South Africa": "ZA",
+    "Cabo Verde": "CV", "Cape Verde": "CV", "DR Congo": "CD", "Burkina Faso": "BF",
+    "Guinea": "GN", "Angola": "AO",
+    "Japan": "JP", "Korea Republic": "KR", "South Korea": "KR", "Korea DPR": "KP",
+    "Iran": "IR", "IR Iran": "IR", "Saudi Arabia": "SA", "Australia": "AU",
+    "Qatar": "QA", "Iraq": "IQ", "United Arab Emirates": "AE", "Uzbekistan": "UZ",
+    "Jordan": "JO", "Oman": "OM", "China": "CN", "China PR": "CN", "Bahrain": "BH",
+    "Indonesia": "ID", "Vietnam": "VN", "Thailand": "TH",
+    "New Zealand": "NZ",
+}
+_TEAM_FLAG_SPECIAL = {
+    "England": _subdivision_flag("gbeng"),
+    "Scotland": _subdivision_flag("gbsct"),
+    "Wales": _subdivision_flag("gbwls"),
+}
+_VS_RE = re.compile(r"\s+vs\.?\s+", re.IGNORECASE)
+
+
+def team_flag(name):
+    name = (name or "").strip()
+    if name in _TEAM_FLAG_SPECIAL:
+        return _TEAM_FLAG_SPECIAL[name]
+    iso = _TEAM_ISO.get(name)
+    return _flag_from_iso(iso) if iso else ""
+
+
+def split_teams(title):
+    """'Germany vs. Côte d'Ivoire' -> ('Germany', \"Côte d'Ivoire\")."""
+    parts = _VS_RE.split(str(title or ""), maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return str(title or "").strip(), ""
+
+
+def team_label(name):
+    """Flag + name, with no stray space when the flag is unknown."""
+    return f"{team_flag(name)} {_esc(name)}".strip()
+
+
+def favored_team(home, away, score_label):
+    """Which side a scoreline favours: home, away, or None for a draw / unknown."""
+    digits = score_digits(score_label)
+    nums = re.findall(r"\d+", digits) if digits else []
+    if len(nums) < 2:
+        return None
+    h, a = int(nums[0]), int(nums[1])
+    return home if h > a else away if a > h else None
+
+
 def format_game_hebrew(game, top):
     """One upcoming game as a Hebrew Telegram-HTML block: fixture, Israel-local
     kickoff, the most-likely scorelines, and where the money is."""
     slug = html.escape(str(game["slug"]))                       # href value -> full escape
     concrete = specific_scores(game["scores"])                  # drop 'Any Other Score' before top-N
-    lines = [
-        f"<b>{_esc(game['title'])}</b>",
-        f"🕒 {_esc(game['kickoff_il'])} (שעון ישראל)",
-    ]
+    home, away = split_teams(game["title"])
+    # Fixture (with flags) and kickoff on one line; tz is obvious in context.
+    lines = [f"<b>{team_label(home)} vs. {team_label(away)}</b> · {_esc(game['kickoff_il'])}"]
     for r in concrete[:top]:
         prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
-        sc = score_digits(r["scoreline"]) or "תוצאה אחרת"
-        lines.append(f"• {_esc(sc)} — {prob} · {_vol_compact(r['volume'])}")
-    lines.append(f'🔗 <a href="https://polymarket.com/event/{slug}">פולימרקט</a>')
+        sc = (score_digits(r["scoreline"]) or "אחר").replace(" ", "")
+        lines.append(f"• {sc} — {prob} · {_vol_compact(r['volume'])}")
+    leader = max(concrete, key=lambda r: r["volume"])
+    lsc = (score_digits(leader["scoreline"]) or "אחר").replace(" ", "")
+    fav = favored_team(home, away, leader["scoreline"])
+    favour = f"לטובת {team_label(fav)}" if fav else "תיקו"
+    link = f'<a href="https://polymarket.com/event/{slug}">#</a>'
+    lines.append(f"💰 הכי הרבה כסף על {lsc} ({favour}) {link}")
     return "\n".join(lines)
 
 
@@ -409,10 +492,12 @@ def format_results_hebrew(results, hours):
     """The recent finished matches and their real final scores, as one block."""
     lines = [f"✅ <b>תוצאות מה-{hours:g} השעות האחרונות</b>"]
     for r in results:
+        home, away = split_teams(r["title"])
+        fh, fa = team_flag(home), team_flag(away)
         if r["score"]:                                          # numeric scoreline known
-            lines.append(f"• {_esc(r['result_label'])}")
+            lines.append("• " + " ".join(filter(None, [fh, _esc(r["result_label"]), fa])))
         else:                                                   # 'Any Other Score' won
-            lines.append(f"• {_esc(clean_title(r['title']))} — תוצאה אחרת")
+            lines.append(f"• {team_label(home)} vs. {team_label(away)} — תוצאה אחרת")
     return "\n".join(lines)
 
 
