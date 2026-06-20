@@ -199,7 +199,9 @@ class FlowTest(unittest.TestCase):
         self.assertNotIn("שעון ישראל", block)                   # tz hint dropped
         self.assertIn("הכי הרבה כסף על 2-1", block)             # leader scoreline (9000 > 1000)
         self.assertIn("לטובת", block)                           # in favour of...
-        self.assertIn("Netherlands", block.split("לטובת", 1)[1])  # ...home, since 2-1
+        favour = block.split("לטובת", 1)[1]
+        self.assertIn("🇳🇱", favour)                             # ...home (2-1), shown as flag only
+        self.assertNotIn("Netherlands", favour)                 # country name dropped from לטובת
         self.assertIn(">#</a>", block)                          # inline single-char link
 
     # 2) Telegram flow: real Hebrew message, Jerusalem time, both sections, payload shape.

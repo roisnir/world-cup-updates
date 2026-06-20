@@ -480,7 +480,8 @@ def format_game_hebrew(game, top):
     leader = max(concrete, key=lambda r: r["volume"])
     lsc = (score_digits(leader["scoreline"]) or "אחר").replace(" ", "")
     fav = favored_team(home, away, leader["scoreline"])
-    favour = f"לטובת {team_label(fav)}" if fav else "תיקו"
+    # Flag only (fall back to the name if the country has no flag in our map).
+    favour = f"לטובת {team_flag(fav) or _esc(fav)}" if fav else "תיקו"
     link = f'<a href="https://polymarket.com/event/{slug}">#</a>'
     lines.append(f"💰 הכי הרבה כסף על {lsc} ({favour}) {link}")
     return "\n".join(lines)
