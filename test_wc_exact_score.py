@@ -184,23 +184,40 @@ class FlowTest(unittest.TestCase):
                                         "Alpha 1 - 0 Beta")]  # 100
         self.assertEqual(order, sorted(order))
 
-    # 1d) Hebrew block formatting: flags, inline time (no tz hint), money line with
-    #     the favoured team, and the single-char inline link.
+    # 1d) Hebrew block formatting: flags, inline time (no tz hint), each scoreline
+    #     tagged with the favoured team, and the fixture title carrying the link.
     def test_hebrew_block_formatting(self):
         from datetime import timedelta
         upcoming = [exact_event("Netherlands vs. Sweden", "nl-se-exact-score", self.kick_future,
                                 [("Netherlands 2 - 1 Sweden", 0.30, 9000),   # leader by volume
                                  ("Netherlands 1 - 1 Sweden", 0.20, 1000)], closed=False)]
-        games = wc.build_games(upcoming, self.now, self.now + timedelta(hours=24), "price")
+        games = wc.build_games(upcoming, self.now, self.now + timedelta(hours=24))
         block = wc.format_game_hebrew(games[0], 5)
         self.assertIn("🇳🇱", block)                              # home flag
         self.assertIn("🇸🇪", block)                              # away flag
+        self.assertIn("הולנד", block)                           # Netherlands -> Hebrew
+        self.assertIn("שוודיה", block)                          # Sweden -> Hebrew
+        self.assertNotIn("Netherlands", block)                  # English name not shown
         self.assertIn(wc.fmt_jerusalem(self.now + timedelta(hours=3)), block)  # time inline
         self.assertNotIn("שעון ישראל", block)                   # tz hint dropped
-        self.assertIn("הכי הרבה כסף על 2-1", block)             # leader scoreline (9000 > 1000)
-        self.assertIn("לטובת", block)                           # in favour of...
-        self.assertIn("Netherlands", block.split("לטובת", 1)[1])  # ...home, since 2-1
-        self.assertIn(">🔗</a>", block)                         # inline single-char link
+        # each scoreline names the team it favours (draw -> 'תיקו'); the higher
+        # score 2-1 favours Netherlands, 1-1 is a draw
+        self.assertIn("2 - 1 הולנד", block)
+        self.assertIn("1 - 1 תיקו", block)
+        self.assertNotIn("הכי הרבה כסף", block)                 # money line dropped
+        # the Polymarket link now wraps the fixture title (no standalone '#')
+        title = block.split("\n")[0]
+        self.assertIn('<a href="https://polymarket.com/event/nl-se-exact-score">', title)
+        self.assertIn("הולנד", title)                           # the fixture is the link text
+        self.assertNotIn("#</a>", block)                        # no standalone '#' link
+        # every prediction line now carries a Hebrew word, so Telegram aligns it
+        # RTL natively — no bidi control characters anywhere in the block
+        self.assertNotIn("⁦", block)                       # no LTR isolate
+        self.assertNotIn("‏", block)                       # no RLM
+        pred = [ln for ln in block.split("\n") if "%" in ln and "·" in ln]
+        self.assertTrue(pred)
+        self.assertTrue(all(any("֐" <= ch <= "׿" for ch in ln)
+                            for ln in pred))                    # Hebrew char present
 
     # 2) Telegram flow: real Hebrew message, Jerusalem time, both sections, payload shape.
     def test_telegram_hebrew_message(self):
@@ -226,7 +243,7 @@ class FlowTest(unittest.TestCase):
         self.assertIn("מונדיאל", text)                          # Hebrew header
         self.assertIn(wc.fmt_jerusalem(self.now + timedelta(hours=3)), text)  # Israel-local kickoff
         self.assertIn("תוצאות", text)                           # results subheader
-        self.assertIn("Gamma 3 - 0 Delta", text)                # real final score
+        self.assertIn("Gamma 3 - 0 Delta", text)                # real final score (centered)
         self.assertLessEqual(len(p["text"]), wc.TELEGRAM_MAX_CHARS)
 
     # 3) Results derivation: winning (Yes≈1) market becomes the score; unresolved is skipped.

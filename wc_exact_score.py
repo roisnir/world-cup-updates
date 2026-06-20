@@ -13,8 +13,7 @@ market. The *Yes* price is the implied probability of that exact scoreline (i.e.
 "most likely"); the market *volume* is how much money has been traded on it.
 
 Usage:
-    python wc_exact_score.py                      # next 24h, ranked by probability (default)
-    python wc_exact_score.py --sort volume        # rank by money traded instead
+    python wc_exact_score.py                      # next 24h, most-likely exact scores
     python wc_exact_score.py --hours 12 --top 8
     python wc_exact_score.py --no-results         # skip the recent-results section
     python wc_exact_score.py --debug              # show what the API actually returns
@@ -46,7 +45,7 @@ Telegram (pre-kickoff alerts):
 Dependencies: requests  (pip install requests)
 
 --------------------------------------------------------------------------
-Example output  (python wc_exact_score.py --sort price --top 5)
+Example output  (python wc_exact_score.py --top 5)
 Numbers are illustrative — the top row is the SINGLE MOST LIKELY scoreline.
 --------------------------------------------------------------------------
 World Cup exact-score markets — next 24h — ranked by implied probability
@@ -292,19 +291,18 @@ def specific_scores(scores):
     return concrete or scores
 
 
-def score_sort_key(row, sort):
-    """Sort key (used with reverse=True). For 'price': most likely first, ties
-    broken by money. Price is rounded to the displayed precision (1 decimal of a
-    percent = 3 decimals of price) so two scorelines that *show* the same
-    percentage are treated as a genuine tie and ordered by volume."""
+def score_sort_key(row):
+    """Sort key (used with reverse=True): most likely first, ties broken by money.
+    Price is rounded to the displayed precision (1 decimal of a percent = 3
+    decimals of price) so two scorelines that *show* the same percentage are
+    treated as a genuine tie and ordered by volume."""
     price = row["yes_price"] if row["yes_price"] is not None else -1.0
-    price = round(price, 3)
-    return (row["volume"], price) if sort == "volume" else (price, row["volume"])
+    return (round(price, 3), row["volume"])
 
 
-def build_games(events, now, start_max, sort):
+def build_games(events, now, start_max):
     """Upcoming events with exact-score markets kicking off in (now, start_max],
-    each with its scorelines ranked by `sort` ('price' or 'volume')."""
+    each with its scorelines ranked by probability (volume breaks ties)."""
     games = []
     for ev in events:
         ks = event_kickoff(ev)
@@ -313,7 +311,7 @@ def build_games(events, now, start_max, sort):
         scores = collect_exact_scores(ev)
         if not scores:
             continue
-        scores.sort(key=lambda r: score_sort_key(r, sort), reverse=True)
+        scores.sort(key=score_sort_key, reverse=True)
         games.append({
             "title": clean_title(ev.get("title") or ev.get("slug")),
             "slug": ev.get("slug"),
@@ -375,7 +373,12 @@ def load_env_file(path):
     return set_count
 
 
-HE_HEADER = "מונדיאל ⚽ — מה מהמרים בפולימרקט"
+HE_BRAND = "מונדיאל ⚽"
+HE_PRED_TITLE = "מה מהמרים בפולימרקט"
+
+
+def he_results_title(hours):
+    return f"תוצאות מה-{hours:g} השעות האחרונות"
 
 # In Telegram-HTML only & < > need escaping; quotes read cleaner left alone
 # (e.g. "Côte d'Ivoire"). Slugs are URL-safe so the href needs no quote-escaping.
@@ -433,6 +436,37 @@ _TEAM_FLAG_SPECIAL = {
     "Scotland": _subdivision_flag("gbsct"),
     "Wales": _subdivision_flag("gbwls"),
 }
+
+# Polymarket team name -> Hebrew. Unknown names fall back to the English name.
+_TEAM_HE = {
+    "Netherlands": "הולנד", "Sweden": "שוודיה", "Germany": "גרמניה", "Spain": "ספרד",
+    "Belgium": "בלגיה", "France": "צרפת", "Portugal": "פורטוגל", "Italy": "איטליה",
+    "Croatia": "קרואטיה", "Switzerland": "שווייץ", "Denmark": "דנמרק", "Poland": "פולין",
+    "Austria": "אוסטריה", "Serbia": "סרביה", "Ukraine": "אוקראינה", "Czechia": "צ'כיה",
+    "Czech Republic": "צ'כיה", "Türkiye": "טורקיה", "Turkey": "טורקיה", "Norway": "נורבגיה",
+    "Hungary": "הונגריה", "Greece": "יוון", "Romania": "רומניה", "Slovenia": "סלובניה",
+    "Slovakia": "סלובקיה", "Albania": "אלבניה", "Republic of Ireland": "אירלנד",
+    "Ireland": "אירלנד", "Iceland": "איסלנד", "Finland": "פינלנד", "Russia": "רוסיה",
+    "England": "אנגליה", "Scotland": "סקוטלנד", "Wales": "ויילס",
+    "Brazil": "ברזיל", "Argentina": "ארגנטינה", "Uruguay": "אורוגוואי", "Colombia": "קולומביה",
+    "Chile": "צ'ילה", "Peru": "פרו", "Paraguay": "פרגוואי", "Ecuador": "אקוודור",
+    "Bolivia": "בוליביה", "Venezuela": "ונצואלה",
+    "United States": "ארה\"ב", "USA": "ארה\"ב", "Mexico": "מקסיקו", "Canada": "קנדה",
+    "Costa Rica": "קוסטה ריקה", "Panama": "פנמה", "Honduras": "הונדורס", "Jamaica": "ג'מייקה",
+    "Haiti": "האיטי", "Curaçao": "קוראסאו", "El Salvador": "אל סלבדור", "Guatemala": "גואטמלה",
+    "Trinidad and Tobago": "טרינידד וטובגו",
+    "Morocco": "מרוקו", "Senegal": "סנגל", "Côte d'Ivoire": "חוף השנהב", "Ivory Coast": "חוף השנהב",
+    "Cameroon": "קמרון", "Ghana": "גאנה", "Nigeria": "ניגריה", "Tunisia": "תוניסיה",
+    "Algeria": "אלג'יריה", "Egypt": "מצרים", "Mali": "מאלי", "South Africa": "דרום אפריקה",
+    "Cabo Verde": "כף ורדה", "Cape Verde": "כף ורדה", "DR Congo": "קונגו",
+    "Burkina Faso": "בורקינה פאסו", "Guinea": "גינאה", "Angola": "אנגולה",
+    "Japan": "יפן", "Korea Republic": "דרום קוריאה", "South Korea": "דרום קוריאה",
+    "Korea DPR": "צפון קוריאה", "Iran": "איראן", "IR Iran": "איראן", "Saudi Arabia": "ערב הסעודית",
+    "Australia": "אוסטרליה", "Qatar": "קטאר", "Iraq": "עיראק",
+    "United Arab Emirates": "איחוד האמירויות", "Uzbekistan": "אוזבקיסטן", "Jordan": "ירדן",
+    "Oman": "עומאן", "China": "סין", "China PR": "סין", "Bahrain": "בחריין",
+    "Indonesia": "אינדונזיה", "Vietnam": "וייטנאם", "Thailand": "תאילנד", "New Zealand": "ניו זילנד",
+}
 _VS_RE = re.compile(r"\s+vs\.?\s+", re.IGNORECASE)
 
 
@@ -444,6 +478,12 @@ def team_flag(name):
     return _flag_from_iso(iso) if iso else ""
 
 
+def team_he(name):
+    """Hebrew country name, falling back to the original (English) if unmapped."""
+    name = (name or "").strip()
+    return _TEAM_HE.get(name, name)
+
+
 def split_teams(title):
     """'Germany vs. Côte d'Ivoire' -> ('Germany', \"Côte d'Ivoire\")."""
     parts = _VS_RE.split(str(title or ""), maxsplit=1)
@@ -453,8 +493,8 @@ def split_teams(title):
 
 
 def team_label(name):
-    """Flag + name, with no stray space when the flag is unknown."""
-    return f"{team_flag(name)} {_esc(name)}".strip()
+    """Flag + Hebrew name, with no stray space when the flag is unknown."""
+    return f"{team_flag(name)} {_esc(team_he(name))}".strip()
 
 
 def favored_team(home, away, score_label):
@@ -468,50 +508,69 @@ def favored_team(home, away, score_label):
 
 
 def format_game_hebrew(game, top):
-    """One upcoming game as a Hebrew Telegram-HTML block: fixture, Israel-local
-    kickoff, the most-likely scorelines, and where the money is."""
+    """One upcoming game as a Hebrew Telegram-HTML block: the fixture (linked to
+    the Polymarket event) with Israel-local kickoff, then the most-likely
+    scorelines, each tagged with the team it favours. Every line carries a Hebrew
+    word, so Telegram lays the whole block out RTL / right-aligned natively — no
+    bidi control chars, and naming the favoured side makes the bare digits
+    unambiguous against the (RTL) team order."""
     slug = html.escape(str(game["slug"]))                       # href value -> full escape
     concrete = specific_scores(game["scores"])                  # drop 'Any Other Score' before top-N
     home, away = split_teams(game["title"])
-    # Fixture (with flags) and kickoff on one line; tz is obvious in context.
-    lines = [f"<b>{team_label(home)} vs. {team_label(away)}</b> · {_esc(game['kickoff_il'])}"]
+    # Fixture (with flags) is the link to the event; kickoff inline, tz obvious.
+    url = f"https://polymarket.com/event/{slug}"
+    fixture = f"{team_label(home)} vs. {team_label(away)}"
+    kickoff = _esc(game["kickoff_il"])
+    lines = [f'<b><a href="{url}">{fixture}</a></b> · {kickoff}']
     for r in concrete[:top]:
         prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
-        sc = (score_digits(r["scoreline"]) or "אחר").replace(" ", "")
-        lines.append(f"• {sc} — {prob} · {_vol_compact(r['volume'])}")
-    leader = max(concrete, key=lambda r: r["volume"])
-    lsc = (score_digits(leader["scoreline"]) or "אחר").replace(" ", "")
-    fav = favored_team(home, away, leader["scoreline"])
-    favour = f"לטובת {team_label(fav)}" if fav else "תיקו"
-    link = f'<a href="https://polymarket.com/event/{slug}">🔗</a>'
-    lines.append(f"💰 הכי הרבה כסף על {lsc} ({favour}) {link}")
+        digits = score_digits(r["scoreline"])
+        sc = (digits or "אחר")
+        fav = favored_team(home, away, r["scoreline"])
+        # Name the favoured side (draw -> 'תיקו'); a Hebrew word here also anchors
+        # the line RTL so it right-aligns natively.
+        tag = _esc(team_he(fav)) if fav else ("תיקו" if digits else "")
+        head = f"{sc} {tag}".strip()
+        lines.append(f"• {head} — {prob} · {_vol_compact(r['volume'])}")
     return "\n".join(lines)
 
 
-def format_results_hebrew(results, hours):
-    """The recent finished matches and their real final scores, as one block."""
-    lines = [f"✅ <b>תוצאות מה-{hours:g} השעות האחרונות</b>"]
+def format_results_body(results):
+    """Just the result lines (no header): '🇹🇷 טורקיה 0 - פרגוואי 1 🇵🇾'.
+
+    Each team is written immediately next to its OWN goals, rather than the
+    conventional 'Turkey 0 - 1 Paraguay'. In an RTL line the bare 'X - Y' score
+    is an LTR island whose internal order opposes the RTL team order, so the
+    digits end up swapped against the teams; gluing each goal to its team avoids
+    that. The Hebrew names anchor each line RTL so it right-aligns natively."""
+    lines = []
     for r in results:
         home, away = split_teams(r["title"])
         fh, fa = team_flag(home), team_flag(away)
-        if r["score"]:                                          # numeric scoreline known
-            lines.append("• " + " ".join(filter(None, [fh, _esc(r["result_label"]), fa])))
+        nums = re.findall(r"\d+", r["score"]) if r["score"] else []
+        if len(nums) == 2:                                      # numeric scoreline known
+            hg, ag = nums
+            parts = [fh, f"{_esc(team_he(home))} {hg}", "-", f"{ag} {_esc(team_he(away))}", fa]
+            lines.append("• " + " ".join(filter(None, parts)))
         else:                                                   # 'Any Other Score' won
             lines.append(f"• {team_label(home)} vs. {team_label(away)} — תוצאה אחרת")
     return "\n".join(lines)
 
 
 def telegram_blocks(games, results, top, hours):
-    """Assemble the full Hebrew message as a list of blocks for pack_blocks()."""
+    """Assemble the full Hebrew message as blocks for pack_blocks(): recent
+    results first (carrying the brand), then the upcoming predictions."""
     blocks = []
-    head = [f"<b>{_esc(HE_HEADER)}</b>"]
-    if games:
-        head.append(f"🔮 <b>{hours:g} השעות הקרובות — התוצאות הסבירות</b>")
-    blocks.append("\n".join(head))
-    for g in games:
-        blocks.append(format_game_hebrew(g, top))
     if results:
-        blocks.append(format_results_hebrew(results, hours))
+        header = f"<b>{_esc(HE_BRAND)} — {_esc(he_results_title(hours))}</b>"
+        blocks.append(header + "\n" + format_results_body(results))
+    if games:
+        # The brand leads the message; if results already showed it above, the
+        # predictions section just gets its own title.
+        title = HE_PRED_TITLE if results else f"{HE_BRAND} — {HE_PRED_TITLE}"
+        blocks.append(f"<b>{_esc(title)}</b>")
+        for g in games:
+            blocks.append(format_game_hebrew(g, top))
     return blocks
 
 
@@ -575,8 +634,6 @@ def main(argv=None):
     ap.add_argument("--tag", default="fifa-world-cup",
                     help="Gamma tag slug (default 'fifa-world-cup' — the tag that carries "
                          "individual match markets; 'world-cup' holds only tournament futures).")
-    ap.add_argument("--sort", choices=("volume", "price"), default="price",
-                    help="Rank scorelines by 'price' (probability / most likely, default) or 'volume' (money).")
     ap.add_argument("--top", type=int, default=5, help="Show top N scorelines per game (default 5).")
     ap.add_argument("--results", action=argparse.BooleanOptionalAction, default=True,
                     help="Include a section of real final scores from the matching window in the "
@@ -651,7 +708,7 @@ def main(argv=None):
               f"{sorted(seen_types) if seen_types else '(none)'}")
         print(f"[debug] window: {iso_z(now)} .. {iso_z(start_max)}\n")
 
-    games = build_games(events, now, start_max, args.sort)
+    games = build_games(events, now, start_max)
 
     # Recent results: the same-length window in the past, from CLOSED events.
     results = []
@@ -670,9 +727,15 @@ def main(argv=None):
         print("and the sportsMarketType values the API is actually returning.")
         return 0
 
-    label = "volume (money)" if args.sort == "volume" else "implied probability"
+    if results:
+        print(f"Recent results — last {args.hours:g}h:")
+        for r in results:
+            shown = r["result_label"] if r["score"] else f"{clean_title(r['title'])} — Any Other Score"
+            print(f"    {shown}   (kickoff {r['kickoff_il']} IL)")
+        print()
+
     if games:
-        print(f"World Cup exact-score markets — next {args.hours:g}h — ranked by {label}\n")
+        print(f"World Cup exact-score markets — next {args.hours:g}h — ranked by implied probability\n")
         for g in games:
             concrete = specific_scores(g["scores"])
             print(f"=== {g['title']}   (kickoff {g['kickoff_utc']} | {g['kickoff_il']} IL)")
@@ -681,13 +744,6 @@ def main(argv=None):
                 prob = f"{r['yes_price']*100:5.1f}%" if r["yes_price"] is not None else "   n/a"
                 print(f"    {r['scoreline']:<28} prob={prob}   vol=${r['volume']:,.0f}")
             print()
-
-    if results:
-        print(f"Recent results — last {args.hours:g}h:")
-        for r in results:
-            shown = r["result_label"] if r["score"] else f"{clean_title(r['title'])} — Any Other Score"
-            print(f"    {shown}   (kickoff {r['kickoff_il']} IL)")
-        print()
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
