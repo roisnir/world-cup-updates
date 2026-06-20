@@ -206,12 +206,18 @@ class FlowTest(unittest.TestCase):
         self.assertIn("🇳🇱", favour)                             # ...home (2-1), shown as flag only
         self.assertNotIn("Netherlands", favour)                 # country name dropped from לטובת
         self.assertIn(">#</a>", block)                          # inline single-char link
-        # the all-LTR prediction lines are RTL-aligned (lead with RLM) so they
-        # don't render left-aligned amid the Hebrew
+        # each scoreline names the team it favours (draw -> 'תיקו'); the higher
+        # score 2-1 favours Netherlands, 1-1 is a draw
+        self.assertIn("2-1 הולנד", block)
+        self.assertIn("1-1 תיקו", block)
+        # every prediction line now carries a Hebrew word, so Telegram aligns it
+        # RTL natively — no bidi control characters anywhere in the block
+        self.assertNotIn("⁦", block)                       # no LTR isolate
+        self.assertNotIn("‏", block)                       # no RLM
         pred = [ln for ln in block.split("\n") if "%" in ln and "·" in ln]
         self.assertTrue(pred)
-        self.assertTrue(all(ln.startswith("‏⁦") and ln.endswith("⁩")
-                            for ln in pred))
+        self.assertTrue(all(any("֐" <= ch <= "׿" for ch in ln)
+                            for ln in pred))                    # Hebrew char present
 
     # 2) Telegram flow: real Hebrew message, Jerusalem time, both sections, payload shape.
     def test_telegram_hebrew_message(self):
@@ -237,7 +243,8 @@ class FlowTest(unittest.TestCase):
         self.assertIn("מונדיאל", text)                          # Hebrew header
         self.assertIn(wc.fmt_jerusalem(self.now + timedelta(hours=3)), text)  # Israel-local kickoff
         self.assertIn("תוצאות", text)                           # results subheader
-        self.assertIn("Gamma 3 - 0 Delta", text)                # real final score
+        self.assertIn("Gamma 3", text)                          # real final score, each team
+        self.assertIn("Delta 0", text)                          # paired with its own goals
         self.assertLessEqual(len(p["text"]), wc.TELEGRAM_MAX_CHARS)
 
     # 3) Results derivation: winning (Yes≈1) market becomes the score; unresolved is skipped.

@@ -391,14 +391,6 @@ def _vol_compact(v):
     return f"${v / 1000:.1f}k" if v >= 1000 else f"${v:,.0f}"
 
 
-def _rtl_line(text):
-    """Right-align an all-LTR line inside an RTL message. The leading RLM (U+200F)
-    makes the line's base direction RTL (so Telegram right-aligns it); the LTR
-    isolate (U+2066..U+2069) keeps the inner token order intact (e.g.
-    '2-1 — 11.5% · $34k', not reversed)."""
-    return "‏⁦" + text + "⁩"
-
-
 def _flag_from_iso(iso2):
     """ISO-3166 alpha-2 -> regional-indicator flag emoji, e.g. 'NL' -> 🇳🇱."""
     return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in iso2)
@@ -517,19 +509,26 @@ def favored_team(home, away, score_label):
 
 def format_game_hebrew(game, top):
     """One upcoming game as a Hebrew Telegram-HTML block: fixture, Israel-local
-    kickoff, the most-likely scorelines, and where the money is."""
+    kickoff, the most-likely scorelines (each tagged with the team it favours),
+    and where the money is. Every line carries a Hebrew word, so Telegram lays
+    the whole block out RTL / right-aligned natively — no bidi control chars, and
+    naming the favoured side makes the bare digits unambiguous against the
+    (RTL) team order."""
     slug = html.escape(str(game["slug"]))                       # href value -> full escape
     concrete = specific_scores(game["scores"])                  # drop 'Any Other Score' before top-N
     home, away = split_teams(game["title"])
     # Fixture (with flags) and kickoff on one line; tz is obvious in context.
-    # LTR-isolate it like the score lines below so home stays on the LEFT in both:
-    # otherwise the Hebrew names make the header lay out RTL (home on the right)
-    # while the LTR score digits keep home on the left, and the two look reversed.
-    lines = [_rtl_line(f"<b>{team_label(home)} vs. {team_label(away)}</b> · {_esc(game['kickoff_il'])}")]
+    lines = [f"<b>{team_label(home)} vs. {team_label(away)}</b> · {_esc(game['kickoff_il'])}"]
     for r in concrete[:top]:
         prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
-        sc = (score_digits(r["scoreline"]) or "אחר").replace(" ", "")
-        lines.append(_rtl_line(f"• {sc} — {prob} · {_vol_compact(r['volume'])}"))
+        digits = score_digits(r["scoreline"])
+        sc = (digits or "אחר").replace(" ", "")
+        fav = favored_team(home, away, r["scoreline"])
+        # Name the favoured side (draw -> 'תיקו'); a Hebrew word here also anchors
+        # the line RTL so it right-aligns natively.
+        tag = _esc(team_he(fav)) if fav else ("תיקו" if digits else "")
+        head = f"{sc} {tag}".strip()
+        lines.append(f"• {head} — {prob} · {_vol_compact(r['volume'])}")
     leader = max(concrete, key=lambda r: r["volume"])
     lsc = (score_digits(leader["scoreline"]) or "אחר").replace(" ", "")
     fav = favored_team(home, away, leader["scoreline"])
@@ -541,21 +540,24 @@ def format_game_hebrew(game, top):
 
 
 def format_results_body(results):
-    """Just the result lines (no header): '🇹🇷 טורקיה 0 - 1 פרגוואי 🇵🇾'.
+    """Just the result lines (no header): '🇹🇷 טורקיה 0 - פרגוואי 1 🇵🇾'.
 
-    LTR-isolated like the prediction lines so home stays on the LEFT and its
-    score on the left too — otherwise the Hebrew names lay the line out RTL
-    (home on the right) while the score digits keep home on the left, and team
-    order looks reversed against its own score (and against the predictions)."""
+    Each team is written immediately next to its OWN goals, rather than the
+    conventional 'Turkey 0 - 1 Paraguay'. In an RTL line the bare 'X - Y' score
+    is an LTR island whose internal order opposes the RTL team order, so the
+    digits end up swapped against the teams; gluing each goal to its team avoids
+    that. The Hebrew names anchor each line RTL so it right-aligns natively."""
     lines = []
     for r in results:
         home, away = split_teams(r["title"])
         fh, fa = team_flag(home), team_flag(away)
-        if r["score"]:                                          # numeric scoreline known
-            he = f"{_esc(team_he(home))} {r['score']} {_esc(team_he(away))}"
-            lines.append(_rtl_line("• " + " ".join(filter(None, [fh, he, fa]))))
+        nums = re.findall(r"\d+", r["score"]) if r["score"] else []
+        if len(nums) == 2:                                      # numeric scoreline known
+            hg, ag = nums
+            parts = [fh, f"{_esc(team_he(home))} {hg}", "-", f"{_esc(team_he(away))} {ag}", fa]
+            lines.append("• " + " ".join(filter(None, parts)))
         else:                                                   # 'Any Other Score' won
-            lines.append(_rtl_line(f"• {team_label(home)} vs. {team_label(away)} — תוצאה אחרת"))
+            lines.append(f"• {team_label(home)} vs. {team_label(away)} — תוצאה אחרת")
     return "\n".join(lines)
 
 
