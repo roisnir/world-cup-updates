@@ -401,9 +401,6 @@ def format_game_hebrew(game, top):
         prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
         sc = score_digits(r["scoreline"]) or "תוצאה אחרת"
         lines.append(f"• {_esc(sc)} — {prob} · {_vol_compact(r['volume'])}")
-    money_leader = max(concrete, key=lambda r: r["volume"])
-    ml = score_digits(money_leader["scoreline"]) or "תוצאה אחרת"
-    lines.append(f"💰 הכי הרבה כסף על {_esc(ml)}")
     lines.append(f'🔗 <a href="https://polymarket.com/event/{slug}">פולימרקט</a>')
     return "\n".join(lines)
 
@@ -598,8 +595,7 @@ def main(argv=None):
             for r in concrete[:args.top]:
                 prob = f"{r['yes_price']*100:5.1f}%" if r["yes_price"] is not None else "   n/a"
                 print(f"    {r['scoreline']:<28} prob={prob}   vol=${r['volume']:,.0f}")
-            money_leader = max(concrete, key=lambda r: r["volume"])
-            print(f"    -> most money on: {money_leader['scoreline']} (${money_leader['volume']:,.0f})\n")
+            print()
 
     if results:
         print(f"Recent results — last {args.hours:g}h:")

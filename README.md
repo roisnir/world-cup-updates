@@ -26,8 +26,9 @@ python wc_exact_score.py --no-results     # skip the recent-results section
 python wc_exact_score.py --debug          # diagnose what the API returns
 ```
 
-`prob` (price) = most likely scoreline; `vol` = most money traded. They differ,
-so the top-probability row and the "most money on" row need not match.
+Scorelines are ranked by `prob` (implied probability) — the top row is the most
+likely exact score. `vol` (money traded on that scoreline) breaks ties when two
+scores share the same probability. The "Any Other Score" catch-all is excluded.
 
 The **recent results** section (on by default) reports the actual final scores of
 matches that kicked off in the last N hours — derived from whichever exact-score

@@ -165,8 +165,6 @@ class FlowTest(unittest.TestCase):
         for shown in ("Alpha 2 - 1 Beta", "Alpha 1 - 1 Beta", "Alpha 1 - 0 Beta"):
             self.assertIn(shown, out)                           # ...3 real scorelines are
         self.assertNotIn("Alpha 0 - 0 Beta", out)               # 4th concrete one is past top-3
-        # money leader is concrete too, not the (higher-volume) catch-all
-        self.assertIn("most money on: Alpha 2 - 1 Beta", out)
 
     # 1c) Price is primary, volume breaks ties: a higher-priced score outranks a
     #     huge-volume one, and equal-priced scores order by volume.
