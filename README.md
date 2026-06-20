@@ -29,6 +29,13 @@ Scorelines are ranked by `prob` (implied probability) — the top row is the mos
 likely exact score. `vol` (money traded on that scoreline) breaks ties when two
 scores share the same probability. The "Any Other Score" catch-all is excluded.
 
+Each game also shows its **match-winner (1X2) odds** — `P(home win)` / `P(draw)` /
+`P(away win)` — independent of the exact score, e.g.
+`moneyline: Netherlands 56% / Draw 24% / Sweden 20%`. Polymarket carries these in a
+separate `X vs. Y` event (the `moneyline` `sportsMarketType`, one Yes/No market per
+side) which the tool matches back to the fixture by title + kickoff. If a game has
+no moneyline market the line is omitted.
+
 The **recent results** section (on by default) reports the actual final scores of
 matches that kicked off in the last N hours — derived from whichever exact-score
 market resolved to Yes. It costs one extra API call; disable with `--no-results`.
@@ -66,7 +73,8 @@ python wc_exact_score.py --telegram --hours 2
 ```
 
 `--telegram` sends the channel a **Hebrew** message — header
-`מונדיאל ⚽ — מה מהמרים בפולימרקט`, the most-likely scorelines per upcoming game
+`מונדיאל ⚽ — מה מהמרים בפולימרקט`, a 🏆 match-winner odds line per game
+(`🏆 🇳🇱 56% · תיקו 24% · 🇸🇪 20%`), the most-likely scorelines per upcoming game
 with kickoffs in **Israel time**, and the recent real results — **and** still
 prints the English breakdown to stdout, so local testing is unaffected. Output is
 HTML-formatted and chunked to respect Telegram's 4096-char limit (a game is never

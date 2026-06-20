@@ -52,6 +52,7 @@ World Cup exact-score markets — next 24h — ranked by implied probability
 
 === Netherlands vs. Sweden   (kickoff 2026-06-20T17:00:00Z)
     https://polymarket.com/event/fifwc-nld-swe-2026-06-20
+    moneyline: Netherlands 56% / Draw 24% / Sweden 20%
     1-0 (NLD)              prob= 11.5%   vol=$48,200
     1-1                    prob= 10.2%   vol=$61,750
     2-1 (NLD)             prob=  9.8%   vol=$53,010
@@ -87,6 +88,14 @@ SCORELINE_RE = re.compile(r"^\s*\d+\s*[-–:]\s*\d+\s*$")          # "2-1", "0 -
 EXACT_SCORE_TEXT_RE = re.compile(r"exact\s*score|correct\s*score", re.IGNORECASE)
 SCORE_DIGITS_RE = re.compile(r"(\d+)\s*[-–:]\s*(\d+)")           # pull "0 - 1" out of any label
 EXACT_SCORE_SUFFIX_RE = re.compile(r"\s*[-–]\s*Exact Score\s*$", re.IGNORECASE)
+
+# Match-winner / 1X2 moneyline. Polymarket carries this as its OWN event (the bare
+# "X vs. Y" fixture, distinct from the "... - Exact Score" event), where each of the
+# three outcomes — home win, draw, away win — is its own binary Yes/No market. The
+# market's `sportsMarketType` is "moneyline" (no sport prefix) and the side is named
+# by `groupItemTitle`: the home/away team name, or "Draw (X vs. Y)" for the draw.
+MONEYLINE_TYPES = {"moneyline", "soccer_moneyline", "money_line"}
+DRAW_TITLE_RE = re.compile(r"^\s*draw\b", re.IGNORECASE)         # "Draw (X vs. Y)"
 
 # Display timezone for the Telegram message. zoneinfo is stdlib (3.9+) and reads
 # the OS tz database, so `requests` stays the only pip dependency. If the tz data
@@ -211,6 +220,53 @@ def is_exact_score_market(m):
     return False
 
 
+def is_moneyline_market(m):
+    """A single side of the 3-way match-winner (1X2) market: home/draw/away, each
+    a binary Yes/No. Identified primarily by sportsMarketType 'moneyline' (matched
+    on a substring so a future 'soccer_moneyline' prefix still works)."""
+    smt = (m.get("sportsMarketType") or "").strip().lower()
+    return smt in MONEYLINE_TYPES or "moneyline" in smt or "money_line" in smt
+
+
+def collect_moneyline(event):
+    """For a moneyline EVENT (the bare 'X vs. Y' fixture), classify its three
+    Yes/No markets into home / draw / away win probabilities (raw Yes prices as
+    fractions). The draw market is the one whose groupItemTitle starts with 'Draw';
+    of the remaining two, the side matching the home team (from the event title)
+    is home and the other is away. Returns a dict with home/draw/away probs and the
+    English team names, or None if it isn't a usable moneyline event."""
+    home, away = split_teams(clean_title(event.get("title") or event.get("slug")))
+    draw_p = home_p = away_p = None
+    rest = []                                                   # non-draw sides, in API order
+    for m in event.get("markets") or []:
+        if m.get("closed") or not is_moneyline_market(m):
+            continue
+        yp = yes_price(m)
+        title = (m.get("groupItemTitle") or "").strip()
+        if DRAW_TITLE_RE.match(title):
+            draw_p = yp
+        else:
+            rest.append((title, yp))
+    if draw_p is None and not rest:
+        return None
+    for title, yp in rest:                                     # match a side to home/away by name
+        if home and title == home:
+            home_p = yp
+        elif away and title == away:
+            away_p = yp
+    # Fall back to API order only if name-matching left a slot empty (defensive:
+    # never let an unmatched side masquerade as the wrong team).
+    if home_p is None and away_p is None and len(rest) == 2:
+        (t0, p0), (t1, p1) = rest
+        home_p, away_p = p0, p1
+        home = home or t0
+        away = away or t1
+    if home_p is None and draw_p is None and away_p is None:
+        return None
+    return {"home": home, "away": away,
+            "home_prob": home_p, "draw_prob": draw_p, "away_prob": away_p}
+
+
 def yes_price(m):
     outcomes = parse_json_field(m.get("outcomes"), [])
     prices = parse_json_field(m.get("outcomePrices"), [])
@@ -300,9 +356,30 @@ def score_sort_key(row):
     return (round(price, 3), row["volume"])
 
 
+def build_moneyline_index(events):
+    """Map each fixture to its match-winner odds. Keyed by (clean title, kickoff
+    ISO) since the moneyline lives in its own 'X vs. Y' event, separate from the
+    'X vs. Y - Exact Score' event for the same game — both share that key. A bare
+    title key is also stored as a fallback for the rare case where the two events'
+    kickoff timestamps disagree."""
+    index = {}
+    for ev in events:
+        odds = collect_moneyline(ev)
+        if not odds:
+            continue
+        title = clean_title(ev.get("title") or ev.get("slug"))
+        ks = event_kickoff(ev)
+        index[(title, iso_z(ks) if ks else None)] = odds
+        index.setdefault((title, None), odds)
+    return index
+
+
 def build_games(events, now, start_max):
     """Upcoming events with exact-score markets kicking off in (now, start_max],
-    each with its scorelines ranked by probability (volume breaks ties)."""
+    each with its scorelines ranked by probability (volume breaks ties) and, when
+    available, the 3-way match-winner odds attached from the separate moneyline
+    event for the same fixture."""
+    moneyline = build_moneyline_index(events)
     games = []
     for ev in events:
         ks = event_kickoff(ev)
@@ -312,12 +389,16 @@ def build_games(events, now, start_max):
         if not scores:
             continue
         scores.sort(key=score_sort_key, reverse=True)
+        title = clean_title(ev.get("title") or ev.get("slug"))
+        ks_iso = iso_z(ks)
+        odds = moneyline.get((title, ks_iso)) or moneyline.get((title, None))
         games.append({
-            "title": clean_title(ev.get("title") or ev.get("slug")),
+            "title": title,
             "slug": ev.get("slug"),
-            "kickoff_utc": iso_z(ks),
+            "kickoff_utc": ks_iso,
             "kickoff_il": fmt_jerusalem(ks),
             "scores": scores,
+            "moneyline": odds,                                  # None when no moneyline event
         })
     games.sort(key=lambda g: g["kickoff_utc"])
     return games
@@ -507,6 +588,46 @@ def favored_team(home, away, score_label):
     return home if h > a else away if a > h else None
 
 
+def moneyline_line_hebrew(odds):
+    """The 3-way match-winner odds as one RTL-safe line, e.g.
+    '🏆 🇳🇱 57% · תיקו 24% · 🇸🇪 21%'. Each team's win% is glued to its flag so the
+    number is unambiguous regardless of bidi; the draw is labelled 'תיקו' (a Hebrew
+    word that also anchors the line RTL). Returns None if no probability is known."""
+    def pct(p):
+        return f"{p * 100:.0f}%" if p is not None else "—"
+    home_flag = team_flag(odds.get("home"))
+    away_flag = team_flag(odds.get("away"))
+    parts = []
+    if odds.get("home_prob") is not None:
+        parts.append(f"{home_flag} {pct(odds['home_prob'])}".strip())
+    if odds.get("draw_prob") is not None:
+        parts.append(f"תיקו {pct(odds['draw_prob'])}")
+    if odds.get("away_prob") is not None:
+        parts.append(f"{away_flag} {pct(odds['away_prob'])}".strip())
+    if not parts:
+        return None
+    return "🏆 " + " · ".join(parts)
+
+
+def moneyline_line_english(odds):
+    """The 3-way match-winner odds for the stdout breakdown, e.g.
+    'moneyline: Netherlands 57% / Draw 24% / Sweden 21%'. None if unavailable."""
+    if not odds:
+        return None
+    def pct(p):
+        return f"{p * 100:.0f}%" if p is not None else "n/a"
+    parts = []
+    if odds.get("home_prob") is not None:
+        parts.append(f"{odds.get('home') or 'Home'} {pct(odds['home_prob'])}")
+    if odds.get("draw_prob") is not None:
+        parts.append(f"Draw {pct(odds['draw_prob'])}")
+    if odds.get("away_prob") is not None:
+        parts.append(f"{odds.get('away') or 'Away'} {pct(odds['away_prob'])}")
+    if not parts:
+        return None
+    return "moneyline: " + " / ".join(parts)
+
+
 def format_game_hebrew(game, top):
     """One upcoming game as a Hebrew Telegram-HTML block: the fixture (linked to
     the Polymarket event) with Israel-local kickoff, then the most-likely
@@ -522,6 +643,13 @@ def format_game_hebrew(game, top):
     fixture = f"{team_label(home)} vs. {team_label(away)}"
     kickoff = _esc(game["kickoff_il"])
     lines = [f'<b><a href="{url}">{fixture}</a></b> · {kickoff}']
+    # 3-way match-winner odds right under the header (when the moneyline event
+    # exists for this fixture); omitted entirely otherwise — no half-empty line.
+    odds = game.get("moneyline")
+    if odds:
+        ml = moneyline_line_hebrew(odds)
+        if ml:
+            lines.append(ml)
     for r in concrete[:top]:
         prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
         digits = score_digits(r["scoreline"])
@@ -740,6 +868,9 @@ def main(argv=None):
             concrete = specific_scores(g["scores"])
             print(f"=== {g['title']}   (kickoff {g['kickoff_utc']} | {g['kickoff_il']} IL)")
             print(f"    https://polymarket.com/event/{g['slug']}")
+            ml = moneyline_line_english(g.get("moneyline"))
+            if ml:
+                print(f"    {ml}")
             for r in concrete[:args.top]:
                 prob = f"{r['yes_price']*100:5.1f}%" if r["yes_price"] is not None else "   n/a"
                 print(f"    {r['scoreline']:<28} prob={prob}   vol=${r['volume']:,.0f}")
