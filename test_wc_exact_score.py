@@ -184,8 +184,8 @@ class FlowTest(unittest.TestCase):
                                         "Alpha 1 - 0 Beta")]  # 100
         self.assertEqual(order, sorted(order))
 
-    # 1d) Hebrew block formatting: flags, inline time (no tz hint), money line with
-    #     the favoured team, and the single-char inline link.
+    # 1d) Hebrew block formatting: flags, inline time (no tz hint), each scoreline
+    #     tagged with the favoured team, and the fixture title carrying the link.
     def test_hebrew_block_formatting(self):
         from datetime import timedelta
         upcoming = [exact_event("Netherlands vs. Sweden", "nl-se-exact-score", self.kick_future,
@@ -200,16 +200,16 @@ class FlowTest(unittest.TestCase):
         self.assertNotIn("Netherlands", block)                  # English name not shown
         self.assertIn(wc.fmt_jerusalem(self.now + timedelta(hours=3)), block)  # time inline
         self.assertNotIn("שעון ישראל", block)                   # tz hint dropped
-        self.assertIn("הכי הרבה כסף על 2-1", block)             # leader scoreline (9000 > 1000)
-        self.assertIn("לטובת", block)                           # in favour of...
-        favour = block.split("לטובת", 1)[1]
-        self.assertIn("🇳🇱", favour)                             # ...home (2-1), shown as flag only
-        self.assertNotIn("Netherlands", favour)                 # country name dropped from לטובת
-        self.assertIn(">#</a>", block)                          # inline single-char link
         # each scoreline names the team it favours (draw -> 'תיקו'); the higher
         # score 2-1 favours Netherlands, 1-1 is a draw
         self.assertIn("2-1 הולנד", block)
         self.assertIn("1-1 תיקו", block)
+        self.assertNotIn("הכי הרבה כסף", block)                 # money line dropped
+        # the Polymarket link now wraps the fixture title (no standalone '#')
+        title = block.split("\n")[0]
+        self.assertIn('<a href="https://polymarket.com/event/nl-se-exact-score">', title)
+        self.assertIn("הולנד", title)                           # the fixture is the link text
+        self.assertNotIn("#</a>", block)                        # no standalone '#' link
         # every prediction line now carries a Hebrew word, so Telegram aligns it
         # RTL natively — no bidi control characters anywhere in the block
         self.assertNotIn("⁦", block)                       # no LTR isolate

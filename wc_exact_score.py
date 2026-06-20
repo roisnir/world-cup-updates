@@ -508,17 +508,20 @@ def favored_team(home, away, score_label):
 
 
 def format_game_hebrew(game, top):
-    """One upcoming game as a Hebrew Telegram-HTML block: fixture, Israel-local
-    kickoff, the most-likely scorelines (each tagged with the team it favours),
-    and where the money is. Every line carries a Hebrew word, so Telegram lays
-    the whole block out RTL / right-aligned natively — no bidi control chars, and
-    naming the favoured side makes the bare digits unambiguous against the
-    (RTL) team order."""
+    """One upcoming game as a Hebrew Telegram-HTML block: the fixture (linked to
+    the Polymarket event) with Israel-local kickoff, then the most-likely
+    scorelines, each tagged with the team it favours. Every line carries a Hebrew
+    word, so Telegram lays the whole block out RTL / right-aligned natively — no
+    bidi control chars, and naming the favoured side makes the bare digits
+    unambiguous against the (RTL) team order."""
     slug = html.escape(str(game["slug"]))                       # href value -> full escape
     concrete = specific_scores(game["scores"])                  # drop 'Any Other Score' before top-N
     home, away = split_teams(game["title"])
-    # Fixture (with flags) and kickoff on one line; tz is obvious in context.
-    lines = [f"<b>{team_label(home)} vs. {team_label(away)}</b> · {_esc(game['kickoff_il'])}"]
+    # Fixture (with flags) is the link to the event; kickoff inline, tz obvious.
+    url = f"https://polymarket.com/event/{slug}"
+    fixture = f"{team_label(home)} vs. {team_label(away)}"
+    kickoff = _esc(game["kickoff_il"])
+    lines = [f'<b><a href="{url}">{fixture}</a></b> · {kickoff}']
     for r in concrete[:top]:
         prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
         digits = score_digits(r["scoreline"])
@@ -529,13 +532,6 @@ def format_game_hebrew(game, top):
         tag = _esc(team_he(fav)) if fav else ("תיקו" if digits else "")
         head = f"{sc} {tag}".strip()
         lines.append(f"• {head} — {prob} · {_vol_compact(r['volume'])}")
-    leader = max(concrete, key=lambda r: r["volume"])
-    lsc = (score_digits(leader["scoreline"]) or "אחר").replace(" ", "")
-    fav = favored_team(home, away, leader["scoreline"])
-    # Flag only (fall back to the name if the country has no flag in our map).
-    favour = f"לטובת {team_flag(fav) or _esc(fav)}" if fav else "תיקו"
-    link = f'<a href="https://polymarket.com/event/{slug}">#</a>'
-    lines.append(f"💰 הכי הרבה כסף על {lsc} ({favour}) {link}")
     return "\n".join(lines)
 
 
