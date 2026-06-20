@@ -283,6 +283,15 @@ def fmt_jerusalem(dt):
     return dt.astimezone(JERUSALEM_TZ).strftime("%d/%m %H:%M")
 
 
+def specific_scores(scores):
+    """Drop the 'Any Other Score' catch-all (any label with no numeric score) so
+    displays show only concrete scorelines. Crucially this filters BEFORE the
+    top-N slice, so --top 3 yields 3 real scores rather than 3-minus-the-bucket.
+    Falls back to the full list if a game somehow has only the catch-all."""
+    concrete = [r for r in scores if score_digits(r["scoreline"]) is not None]
+    return concrete or scores
+
+
 def build_games(events, now, start_max, sort):
     """Upcoming events with exact-score markets kicking off in (now, start_max],
     each with its scorelines ranked by `sort` ('price' or 'volume')."""
@@ -374,15 +383,16 @@ def format_game_hebrew(game, top):
     """One upcoming game as a Hebrew Telegram-HTML block: fixture, Israel-local
     kickoff, the most-likely scorelines, and where the money is."""
     slug = html.escape(str(game["slug"]))                       # href value -> full escape
+    concrete = specific_scores(game["scores"])                  # drop 'Any Other Score' before top-N
     lines = [
         f"<b>{_esc(game['title'])}</b>",
         f"🕒 {_esc(game['kickoff_il'])} (שעון ישראל)",
     ]
-    for r in game["scores"][:top]:
+    for r in concrete[:top]:
         prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
         sc = score_digits(r["scoreline"]) or "תוצאה אחרת"
         lines.append(f"• {_esc(sc)} — {prob} · {_vol_compact(r['volume'])}")
-    money_leader = max(game["scores"], key=lambda r: r["volume"])
+    money_leader = max(concrete, key=lambda r: r["volume"])
     ml = score_digits(money_leader["scoreline"]) or "תוצאה אחרת"
     lines.append(f"💰 הכי הרבה כסף על {_esc(ml)}")
     lines.append(f'🔗 <a href="https://polymarket.com/event/{slug}">פולימרקט</a>')
@@ -573,12 +583,13 @@ def main(argv=None):
     if games:
         print(f"World Cup exact-score markets — next {args.hours:g}h — ranked by {label}\n")
         for g in games:
+            concrete = specific_scores(g["scores"])
             print(f"=== {g['title']}   (kickoff {g['kickoff_utc']} | {g['kickoff_il']} IL)")
             print(f"    https://polymarket.com/event/{g['slug']}")
-            for r in g["scores"][:args.top]:
+            for r in concrete[:args.top]:
                 prob = f"{r['yes_price']*100:5.1f}%" if r["yes_price"] is not None else "   n/a"
                 print(f"    {r['scoreline']:<28} prob={prob}   vol=${r['volume']:,.0f}")
-            money_leader = max(g["scores"], key=lambda r: r["volume"])
+            money_leader = max(concrete, key=lambda r: r["volume"])
             print(f"    -> most money on: {money_leader['scoreline']} (${money_leader['volume']:,.0f})\n")
 
     if results:

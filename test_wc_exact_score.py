@@ -149,6 +149,25 @@ class FlowTest(unittest.TestCase):
         self.assertLess(out.index("Alpha 2 - 1 Beta"), out.index("Alpha 1 - 1 Beta"))
         self.assertLess(out.index("Alpha 1 - 1 Beta"), out.index("Alpha 1 - 0 Beta"))
 
+    # 1b) 'Any Other Score' is excluded BEFORE the top-N slice, even when it has
+    #     the highest price -> --top 3 shows 3 concrete scorelines, not 2 + bucket.
+    def test_any_other_score_excluded_before_top_n(self):
+        upcoming = [exact_event("Alpha vs. Beta", "alpha-beta-exact-score", self.kick_future,
+                                [("Alpha 2 - 1 Beta", 0.20, 5000),
+                                 ("Alpha 1 - 1 Beta", 0.18, 4000),
+                                 ("Alpha 1 - 0 Beta", 0.15, 3000),
+                                 ("Alpha 0 - 0 Beta", 0.05, 1000),
+                                 ("Exact Score: Any Other Score", 0.40, 9000)], closed=False)]
+        self.install(upcoming, [])
+        rc, out = self.run_main(["--hours", "24", "--no-results", "--top", "3"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("Any Other", out)                      # bucket never shown...
+        for shown in ("Alpha 2 - 1 Beta", "Alpha 1 - 1 Beta", "Alpha 1 - 0 Beta"):
+            self.assertIn(shown, out)                           # ...3 real scorelines are
+        self.assertNotIn("Alpha 0 - 0 Beta", out)               # 4th concrete one is past top-3
+        # money leader is concrete too, not the (higher-volume) catch-all
+        self.assertIn("most money on: Alpha 2 - 1 Beta", out)
+
     # 2) Telegram flow: real Hebrew message, Jerusalem time, both sections, payload shape.
     def test_telegram_hebrew_message(self):
         upcoming = [exact_event("Alpha vs. Beta", "alpha-beta-exact-score", self.kick_future,
