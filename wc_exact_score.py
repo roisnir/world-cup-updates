@@ -18,6 +18,29 @@ Usage:
     python wc_exact_score.py --hours 12 --top 8
     python wc_exact_score.py --debug              # show what the API actually returns
     python wc_exact_score.py --json results.json  # also dump raw results
+    python wc_exact_score.py --telegram           # ALSO push to a Telegram channel
+    python wc_exact_score.py --test-telegram      # send one test message, verify wiring, exit
+
+Note: the default tag is 'fifa-world-cup', which carries the individual MATCH
+markets (each match's exact-score ladder is its own "X vs. Y - Exact Score"
+event). The 'world-cup' tag holds only tournament futures (group winners,
+awards, player props) and has NO per-match exact-score markets.
+
+Telegram (pre-kickoff alerts):
+    Set up once:
+      1. Create a bot via @BotFather, copy its token.
+      2. Add the bot as an *admin* of your target channel.
+      3. Put secrets in a .env file next to this script (see .env.example):
+           TELEGRAM_BOT_TOKEN=123456:ABC...
+           TELEGRAM_CHAT_ID=@yourchannel          # or -100... for a private channel
+    Then `--telegram` sends the same ranked output to the channel (and still
+    prints to stdout, so local runs are unaffected). With no qualifying games
+    nothing is sent, so a scheduled run stays quiet until there's something to say.
+
+    Schedule it with cron, e.g. every 30 min alerting on games within 2h:
+      */30 * * * * cd /path/to/repo && /usr/bin/python3 wc_exact_score.py \
+                   --telegram --hours 2 >> wc.log 2>&1
+    (The script auto-loads ./.env, so cron needs no extra env wiring.)
 
 Dependencies: requests  (pip install requests)
 
@@ -44,7 +67,9 @@ so the highest-probability row and the "most money on" row need not match.
 from __future__ import annotations
 
 import argparse
+import html
 import json
+import os
 import re
 import sys
 import time
@@ -53,6 +78,9 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 GAMMA = "https://gamma-api.polymarket.com"
+
+TELEGRAM_API = "https://api.telegram.org"
+TELEGRAM_MAX_CHARS = 4096                                        # Telegram per-message hard cap
 
 EXACT_SCORE_TYPES = {"scores", "exact_score", "exact-score", "correct_score", "correctscore"}
 SCORELINE_RE = re.compile(r"^\s*\d+\s*[-–:]\s*\d+\s*$")          # "2-1", "0 - 0"
@@ -153,7 +181,9 @@ def event_kickoff(event):
 
 def is_exact_score_market(m):
     smt = (m.get("sportsMarketType") or "").strip().lower()
-    if smt in EXACT_SCORE_TYPES:
+    # Polymarket prefixes the type per sport, e.g. "soccer_exact_score", so match
+    # on a substring rather than an exact set (the set stays as an extra safety net).
+    if smt in EXACT_SCORE_TYPES or "exact_score" in smt or "correct_score" in smt:
         return True
     if SCORELINE_RE.match(m.get("groupItemTitle") or ""):
         return True
@@ -201,22 +231,164 @@ def collect_exact_scores(event):
     return rows
 
 
+def load_env_file(path):
+    """
+    Minimal `.env` loader (KEY=VALUE per line, # comments allowed). Existing
+    environment variables always win, so an explicit `export` overrides the file.
+    Kept dependency-free on purpose so `requests` stays the only requirement —
+    handy for cron, where the shell environment is otherwise bare.
+    Returns the number of keys set (0 if the file is missing).
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return 0
+    set_count = 0
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+            set_count += 1
+    return set_count
+
+
+def format_game_html(game, top):
+    """Render one game as a Telegram-HTML block. Only & < > need escaping in
+    HTML parse mode, so this is far less fiddly than MarkdownV2."""
+    # Text content only needs & < > escaped; quotes are fine unescaped (and
+    # read cleaner, e.g. "Côte d'Ivoire"). The slug also lands in an href, but
+    # Polymarket slugs are URL-safe so quote-escaping it is moot.
+    title = html.escape(str(game["title"]), quote=False)
+    slug = html.escape(str(game["slug"]))
+    kickoff = html.escape(str(game["kickoff_utc"]), quote=False)
+    lines = [
+        f"⚽ <b>{title}</b>",
+        f"kickoff {kickoff}",
+        f'<a href="https://polymarket.com/event/{slug}">polymarket.com/event/{slug}</a>',
+    ]
+    for r in game["scores"][:top]:
+        prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "n/a"
+        score = html.escape(str(r["scoreline"]), quote=False)
+        lines.append(f"• <code>{score}</code> — prob {prob}, vol ${r['volume']:,.0f}")
+    money_leader = max(game["scores"], key=lambda r: r["volume"])
+    leader = html.escape(str(money_leader["scoreline"]), quote=False)
+    lines.append(f"→ most money on: {leader} (${money_leader['volume']:,.0f})")
+    return "\n".join(lines)
+
+
+def pack_blocks(blocks, limit=TELEGRAM_MAX_CHARS, sep="\n\n"):
+    """Pack rendered blocks into the fewest messages <= `limit` chars, never
+    splitting a block across messages. A single oversize block is hard-split
+    as a last resort so nothing is silently dropped."""
+    messages, current = [], ""
+    for block in blocks:
+        if len(block) > limit:
+            if current:
+                messages.append(current)
+                current = ""
+            for i in range(0, len(block), limit):
+                messages.append(block[i:i + limit])
+            continue
+        candidate = block if not current else current + sep + block
+        if len(candidate) > limit:
+            messages.append(current)
+            current = block
+        else:
+            current = candidate
+    if current:
+        messages.append(current)
+    return messages
+
+
+def send_telegram(session, messages, token, chat_id, parse_mode="HTML"):
+    """POST each message to Telegram's sendMessage. Honours 429 retry_after and
+    surfaces Telegram's own error text (e.g. 'chat not found', 'not enough
+    rights to send text messages') instead of a bare HTTP status."""
+    url = f"{TELEGRAM_API}/bot{token}/sendMessage"
+    for msg in messages:
+        payload = {
+            "chat_id": chat_id,
+            "text": msg,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True,
+        }
+        for attempt in range(3):
+            r = session.post(url, json=payload, timeout=30)
+            try:
+                body = r.json()
+            except ValueError:
+                body = {}
+            if r.status_code == 429:
+                retry_after = (body.get("parameters") or {}).get("retry_after", 1)
+                time.sleep(retry_after + 0.5)
+                continue
+            if not body.get("ok", False):
+                desc = body.get("description") or f"HTTP {r.status_code}"
+                raise RuntimeError(f"Telegram API error ({r.status_code}): {desc}")
+            break
+        else:
+            raise RuntimeError("Telegram API error: still rate-limited after 3 attempts")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Polymarket World Cup exact-score odds for upcoming games.")
     ap.add_argument("--hours", type=float, default=24.0, help="Look-ahead window in hours (default 24).")
-    ap.add_argument("--tag", default="world-cup", help="Gamma tag slug (default 'world-cup').")
+    ap.add_argument("--tag", default="fifa-world-cup",
+                    help="Gamma tag slug (default 'fifa-world-cup' — the tag that carries "
+                         "individual match markets; 'world-cup' holds only tournament futures).")
     ap.add_argument("--sort", choices=("volume", "price"), default="volume",
                     help="Rank scorelines by 'volume' (money) or 'price' (probability / most likely).")
     ap.add_argument("--top", type=int, default=5, help="Show top N scorelines per game (default 5).")
     ap.add_argument("--json", metavar="PATH", help="Optional path to dump raw results as JSON.")
+    ap.add_argument("--telegram", action="store_true",
+                    help="Also push the ranked output to a Telegram channel "
+                         "(reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID).")
+    ap.add_argument("--test-telegram", action="store_true",
+                    help="Send a single test message to verify the bot/chat wiring, then exit "
+                         "(does not query Polymarket).")
+    default_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    ap.add_argument("--env-file", default=default_env, metavar="PATH",
+                    help="Path to a .env file with secrets (default: .env next to this script).")
     ap.add_argument("--debug", action="store_true", help="Print diagnostics about what the API returns.")
     args = ap.parse_args()
 
-    now = datetime.now(timezone.utc)
-    start_max = now + timedelta(hours=args.hours)
+    loaded = load_env_file(args.env_file)
+    if args.debug and loaded:
+        print(f"[debug] loaded {loaded} key(s) from {args.env_file}")
+
+    tg_token = tg_chat = None
+    if args.telegram or args.test_telegram:
+        tg_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        tg_chat = os.environ.get("TELEGRAM_CHAT_ID")
+        missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", tg_token),
+                                  ("TELEGRAM_CHAT_ID", tg_chat)) if not v]
+        if missing:
+            flag = "--test-telegram" if args.test_telegram else "--telegram"
+            print(f"ERROR: {flag} needs {' and '.join(missing)} "
+                  f"(set them in {args.env_file} or the environment).", file=sys.stderr)
+            return 2
 
     session = requests.Session()
     session.headers.update({"User-Agent": "wc-exact-score/1.1"})
+
+    if args.test_telegram:
+        try:
+            send_telegram(session, ["✅ <b>wc_exact_score</b> — Telegram wiring OK"],
+                          tg_token, tg_chat)
+        except (requests.RequestException, RuntimeError) as exc:
+            print(f"Telegram test FAILED: {exc}", file=sys.stderr)
+            return 1
+        print(f"Telegram test message sent to {tg_chat}. Check the channel.")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    start_max = now + timedelta(hours=args.hours)
 
     try:
         events = fetch_events(session, args.tag, end_after=now)
@@ -252,7 +424,11 @@ def main():
             continue
         key = (lambda r: (r["volume"] if args.sort == "volume" else (r["yes_price"] or -1.0)))
         scores.sort(key=key, reverse=True)
-        games.append({"title": ev.get("title") or ev.get("slug"),
+        # Exact-score markets live in a dedicated event titled "X vs. Y - Exact Score";
+        # drop that suffix so the heading reads as just the fixture.
+        title = ev.get("title") or ev.get("slug")
+        title = re.sub(r"\s*[-–]\s*Exact Score\s*$", "", title, flags=re.IGNORECASE)
+        games.append({"title": title,
                       "slug": ev.get("slug"),
                       "kickoff_utc": iso_z(ks),
                       "scores": scores})
@@ -280,6 +456,18 @@ def main():
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(games, fh, indent=2)
         print(f"Raw results written to {args.json}")
+
+    if args.telegram:
+        header = (f"<b>World Cup exact-score</b> — next {args.hours:g}h — "
+                  f"ranked by {html.escape(label)}")
+        blocks = [header] + [format_game_html(g, args.top) for g in games]
+        messages = pack_blocks(blocks)
+        try:
+            send_telegram(session, messages, tg_token, tg_chat)
+        except (requests.RequestException, RuntimeError) as exc:
+            print(f"ERROR sending to Telegram: {exc}", file=sys.stderr)
+            return 1
+        print(f"Sent {len(games)} game(s) to Telegram in {len(messages)} message(s).")
 
     return 0
 
