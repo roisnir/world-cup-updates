@@ -19,6 +19,7 @@
  * like a password: anyone with it can post as your WhatsApp account.
  */
 
+const fs = require('fs')
 const path = require('path')
 
 const baileys = require('@whiskeysockets/baileys')
@@ -35,16 +36,6 @@ const silentLogger = {
   level: 'silent',
   child() { return silentLogger },
   trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {},
-}
-
-function readStdin() {
-  return new Promise((resolve) => {
-    if (process.stdin.isTTY) { resolve(''); return }
-    let data = ''
-    process.stdin.setEncoding('utf8')
-    process.stdin.on('data', (chunk) => { data += chunk })
-    process.stdin.on('end', () => resolve(data))
-  })
 }
 
 /*
@@ -123,7 +114,7 @@ function openSocket({ allowQR = false, onQR = null, timeoutMs = 60000 } = {}) {
 }
 
 async function runSend() {
-  const raw = await readStdin()
+  const raw = fs.readFileSync(0, 'utf8')  // fd 0 = stdin; `send` is always piped a JSON payload
   let payload
   try {
     payload = JSON.parse(raw || '{}')

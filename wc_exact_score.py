@@ -707,26 +707,22 @@ def whatsapp_blocks(games, results, top, hours):
     return blocks
 
 
-def _run_whatsapp_node(command, payload=None, capture=True, timeout=120,
-                       script=None, node=None, auth_dir=None):
+def _run_whatsapp_node(command, payload=None, capture=True, timeout=120):
     """Invoke the Baileys bridge (whatsapp/send.js <command>). `payload` is sent
     as JSON on stdin. Returns the CompletedProcess. Raises RuntimeError with a
-    helpful message when Node or the bridge isn't set up."""
-    script = script or WHATSAPP_SCRIPT
-    node = node or os.environ.get("WHATSAPP_NODE") or "node"
-    if not os.path.exists(script):
+    helpful message when Node or the bridge isn't set up. The bridge reads
+    WHATSAPP_NODE / WHATSAPP_AUTH_DIR from the (inherited) environment."""
+    node = os.environ.get("WHATSAPP_NODE") or "node"
+    if not os.path.exists(WHATSAPP_SCRIPT):
         raise RuntimeError(
-            f"WhatsApp bridge not found at {script}. Did you `cd {WHATSAPP_DIR} && npm install`?")
-    env = os.environ.copy()
-    if auth_dir:
-        env["WHATSAPP_AUTH_DIR"] = auth_dir
-    kwargs = {"env": env, "timeout": timeout}
+            f"WhatsApp bridge not found at {WHATSAPP_SCRIPT}. Did you `cd {WHATSAPP_DIR} && npm install`?")
+    kwargs = {"timeout": timeout}
     if capture:
         kwargs.update(capture_output=True, text=True)
     if payload is not None:
         kwargs.update(input=json.dumps(payload), text=True)
     try:
-        return subprocess.run([node, script, command], **kwargs)
+        return subprocess.run([node, WHATSAPP_SCRIPT, command], **kwargs)
     except FileNotFoundError:
         raise RuntimeError(
             f"Node.js executable '{node}' not found — install Node 18+ "
@@ -735,11 +731,11 @@ def _run_whatsapp_node(command, payload=None, capture=True, timeout=120,
         raise RuntimeError(f"WhatsApp '{command}' timed out after {timeout}s.")
 
 
-def send_whatsapp(messages, group_jid, timeout=120, **kw):
+def send_whatsapp(messages, group_jid, timeout=120):
     """Send each rendered message to a WhatsApp group via the Baileys bridge.
     Surfaces the bridge's own stderr (e.g. 'run login first') on failure."""
     proc = _run_whatsapp_node("send", payload={"jid": group_jid, "messages": messages},
-                              timeout=timeout, **kw)
+                              timeout=timeout)
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"WhatsApp send failed: {err or f'exit {proc.returncode}'}")
