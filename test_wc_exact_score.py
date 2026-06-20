@@ -168,6 +168,24 @@ class FlowTest(unittest.TestCase):
         # money leader is concrete too, not the (higher-volume) catch-all
         self.assertIn("most money on: Alpha 2 - 1 Beta", out)
 
+    # 1c) Price is primary, volume breaks ties: a higher-priced score outranks a
+    #     huge-volume one, and equal-priced scores order by volume.
+    def test_price_primary_volume_breaks_ties(self):
+        upcoming = [exact_event("Alpha vs. Beta", "alpha-beta-exact-score", self.kick_future,
+                                [("Alpha 1 - 0 Beta", 0.115, 100),     # tie @0.115, low vol
+                                 ("Alpha 2 - 1 Beta", 0.115, 9000),    # tie @0.115, high vol
+                                 ("Alpha 0 - 0 Beta", 0.115, 5000),    # tie @0.115, mid vol
+                                 ("Alpha 3 - 0 Beta", 0.20, 10)],      # higher price, tiny vol
+                                closed=False)]
+        self.install(upcoming, [])
+        rc, out = self.run_main(["--hours", "24", "--no-results", "--top", "4"])
+        self.assertEqual(rc, 0)
+        order = [out.index(s) for s in ("Alpha 3 - 0 Beta",   # highest price -> first
+                                        "Alpha 2 - 1 Beta",   # then ties by volume: 9000
+                                        "Alpha 0 - 0 Beta",   # 5000
+                                        "Alpha 1 - 0 Beta")]  # 100
+        self.assertEqual(order, sorted(order))
+
     # 2) Telegram flow: real Hebrew message, Jerusalem time, both sections, payload shape.
     def test_telegram_hebrew_message(self):
         upcoming = [exact_event("Alpha vs. Beta", "alpha-beta-exact-score", self.kick_future,

@@ -292,6 +292,16 @@ def specific_scores(scores):
     return concrete or scores
 
 
+def score_sort_key(row, sort):
+    """Sort key (used with reverse=True). For 'price': most likely first, ties
+    broken by money. Price is rounded to the displayed precision (1 decimal of a
+    percent = 3 decimals of price) so two scorelines that *show* the same
+    percentage are treated as a genuine tie and ordered by volume."""
+    price = row["yes_price"] if row["yes_price"] is not None else -1.0
+    price = round(price, 3)
+    return (row["volume"], price) if sort == "volume" else (price, row["volume"])
+
+
 def build_games(events, now, start_max, sort):
     """Upcoming events with exact-score markets kicking off in (now, start_max],
     each with its scorelines ranked by `sort` ('price' or 'volume')."""
@@ -303,8 +313,7 @@ def build_games(events, now, start_max, sort):
         scores = collect_exact_scores(ev)
         if not scores:
             continue
-        scores.sort(reverse=True,
-                    key=lambda r: r["volume"] if sort == "volume" else (r["yes_price"] or -1.0))
+        scores.sort(key=lambda r: score_sort_key(r, sort), reverse=True)
         games.append({
             "title": clean_title(ev.get("title") or ev.get("slug")),
             "slug": ev.get("slug"),
