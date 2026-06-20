@@ -200,7 +200,7 @@ class FlowTest(unittest.TestCase):
         self.assertIn("הכי הרבה כסף על 2-1", block)             # leader scoreline (9000 > 1000)
         self.assertIn("לטובת", block)                           # in favour of...
         self.assertIn("Netherlands", block.split("לטובת", 1)[1])  # ...home, since 2-1
-        self.assertIn(">#</a>", block)                          # inline single-char link
+        self.assertIn(">🔗</a>", block)                         # inline single-char link
 
     # 2) Telegram flow: real Hebrew message, Jerusalem time, both sections, payload shape.
     def test_telegram_hebrew_message(self):
