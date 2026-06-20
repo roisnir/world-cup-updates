@@ -373,7 +373,12 @@ def load_env_file(path):
     return set_count
 
 
-HE_HEADER = "מונדיאל ⚽ — מה מהמרים בפולימרקט"
+HE_BRAND = "מונדיאל ⚽"
+HE_PRED_TITLE = "מה מהמרים בפולימרקט"
+
+
+def he_results_title(hours):
+    return f"תוצאות מה-{hours:g} השעות האחרונות"
 
 # In Telegram-HTML only & < > need escaping; quotes read cleaner left alone
 # (e.g. "Côte d'Ivoire"). Slugs are URL-safe so the href needs no quote-escaping.
@@ -532,9 +537,9 @@ def format_game_hebrew(game, top):
     return "\n".join(lines)
 
 
-def format_results_hebrew(results, hours):
-    """The recent finished matches and their real final scores, as one block."""
-    lines = [f"✅ <b>תוצאות מה-{hours:g} השעות האחרונות</b>"]
+def format_results_body(results):
+    """Just the result lines (no header): '🇹🇷 טורקיה 0 - 1 פרגוואי 🇵🇾'."""
+    lines = []
     for r in results:
         home, away = split_teams(r["title"])
         fh, fa = team_flag(home), team_flag(away)
@@ -547,18 +552,23 @@ def format_results_hebrew(results, hours):
 
 
 def telegram_blocks(games, results, top, hours):
-    """Assemble the full Hebrew message as a list of blocks for pack_blocks()."""
+    """Assemble the full Hebrew message as blocks for pack_blocks(): recent
+    results first (carrying the brand), then the upcoming predictions."""
     blocks = []
-    head = [f"<b>{_esc(HE_HEADER)}</b>"]
-    blocks.append("\n".join(head))
-    for g in games:
-        blocks.append(format_game_hebrew(g, top))
     if results:
-        blocks.append(format_results_hebrew(results, hours))
+        header = f"<b>{_esc(HE_BRAND)} — {_esc(he_results_title(hours))}</b>"
+        blocks.append(header + "\n" + format_results_body(results))
+    if games:
+        # The brand leads the message; if results already showed it above, the
+        # predictions section just gets its own title.
+        title = HE_PRED_TITLE if results else f"{HE_BRAND} — {HE_PRED_TITLE}"
+        blocks.append(f"<b>{_esc(title)}</b>")
+        for g in games:
+            blocks.append(format_game_hebrew(g, top))
     return blocks
 
 
-def pack_blocks(blocks, limit=TELEGRAM_MAX_CHARS, sep="\n"):
+def pack_blocks(blocks, limit=TELEGRAM_MAX_CHARS, sep="\n\n"):
     """Pack rendered blocks into the fewest messages <= `limit` chars, never
     splitting a block across messages. A single oversize block is hard-split
     as a last resort so nothing is silently dropped."""
@@ -711,6 +721,13 @@ def main(argv=None):
         print("and the sportsMarketType values the API is actually returning.")
         return 0
 
+    if results:
+        print(f"Recent results — last {args.hours:g}h:")
+        for r in results:
+            shown = r["result_label"] if r["score"] else f"{clean_title(r['title'])} — Any Other Score"
+            print(f"    {shown}   (kickoff {r['kickoff_il']} IL)")
+        print()
+
     if games:
         print(f"World Cup exact-score markets — next {args.hours:g}h — ranked by implied probability\n")
         for g in games:
@@ -721,13 +738,6 @@ def main(argv=None):
                 prob = f"{r['yes_price']*100:5.1f}%" if r["yes_price"] is not None else "   n/a"
                 print(f"    {r['scoreline']:<28} prob={prob}   vol=${r['volume']:,.0f}")
             print()
-
-    if results:
-        print(f"Recent results — last {args.hours:g}h:")
-        for r in results:
-            shown = r["result_label"] if r["score"] else f"{clean_title(r['title'])} — Any Other Score"
-            print(f"    {shown}   (kickoff {r['kickoff_il']} IL)")
-        print()
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
