@@ -1,0 +1,19 @@
+# Never copy secrets or local junk into the build context / image.
+.env
+*.log
+wc.log
+results.json
+
+.git
+.gitignore
+.github
+
+__pycache__/
+*.pyc
+*.pyo
+.venv
+venv
+
+# Not needed inside the image.
+README.md
+.dockerignore
