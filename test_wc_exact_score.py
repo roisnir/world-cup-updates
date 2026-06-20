@@ -202,8 +202,8 @@ class FlowTest(unittest.TestCase):
         self.assertNotIn("שעון ישראל", block)                   # tz hint dropped
         # each scoreline names the team it favours (draw -> 'תיקו'); the higher
         # score 2-1 favours Netherlands, 1-1 is a draw
-        self.assertIn("2-1 הולנד", block)
-        self.assertIn("1-1 תיקו", block)
+        self.assertIn("2 - 1 הולנד", block)
+        self.assertIn("1 - 1 תיקו", block)
         self.assertNotIn("הכי הרבה כסף", block)                 # money line dropped
         # the Polymarket link now wraps the fixture title (no standalone '#')
         title = block.split("\n")[0]
@@ -243,8 +243,7 @@ class FlowTest(unittest.TestCase):
         self.assertIn("מונדיאל", text)                          # Hebrew header
         self.assertIn(wc.fmt_jerusalem(self.now + timedelta(hours=3)), text)  # Israel-local kickoff
         self.assertIn("תוצאות", text)                           # results subheader
-        self.assertIn("Gamma 3", text)                          # real final score, each team
-        self.assertIn("Delta 0", text)                          # paired with its own goals
+        self.assertIn("Gamma 3 - 0 Delta", text)                # real final score (centered)
         self.assertLessEqual(len(p["text"]), wc.TELEGRAM_MAX_CHARS)
 
     # 3) Results derivation: winning (Yes≈1) market becomes the score; unresolved is skipped.

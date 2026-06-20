@@ -525,7 +525,7 @@ def format_game_hebrew(game, top):
     for r in concrete[:top]:
         prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
         digits = score_digits(r["scoreline"])
-        sc = (digits or "אחר").replace(" ", "")
+        sc = (digits or "אחר")
         fav = favored_team(home, away, r["scoreline"])
         # Name the favoured side (draw -> 'תיקו'); a Hebrew word here also anchors
         # the line RTL so it right-aligns natively.
@@ -550,7 +550,7 @@ def format_results_body(results):
         nums = re.findall(r"\d+", r["score"]) if r["score"] else []
         if len(nums) == 2:                                      # numeric scoreline known
             hg, ag = nums
-            parts = [fh, f"{_esc(team_he(home))} {hg}", "-", f"{_esc(team_he(away))} {ag}", fa]
+            parts = [fh, f"{_esc(team_he(home))} {hg}", "-", f"{ag} {_esc(team_he(away))}", fa]
             lines.append("• " + " ".join(filter(None, parts)))
         else:                                                   # 'Any Other Score' won
             lines.append(f"• {team_label(home)} vs. {team_label(away)} — תוצאה אחרת")
