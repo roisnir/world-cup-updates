@@ -20,6 +20,10 @@ Usage:
     python wc_exact_score.py --json results.json  # also dump raw results
     python wc_exact_score.py --telegram           # ALSO push to a Telegram channel
     python wc_exact_score.py --test-telegram      # send one test message, verify wiring, exit
+    python wc_exact_score.py --whatsapp           # ALSO push to a WhatsApp group (Baileys bridge)
+    python wc_exact_score.py --whatsapp-login     # pair with WhatsApp once (scan a QR), then exit
+    python wc_exact_score.py --whatsapp-groups    # list your groups + their JIDs, then exit
+    python wc_exact_score.py --test-whatsapp      # send one test message to the group, exit
 
 Note: the default tag is 'fifa-world-cup', which carries the individual MATCH
 markets (each match's exact-score ladder is its own "X vs. Y - Exact Score"
@@ -71,6 +75,7 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -81,6 +86,14 @@ GAMMA = "https://gamma-api.polymarket.com"
 
 TELEGRAM_API = "https://api.telegram.org"
 TELEGRAM_MAX_CHARS = 4096                                        # Telegram per-message hard cap
+
+# WhatsApp is reached through a small Node.js Baileys bridge (whatsapp/send.js)
+# invoked as a subprocess — Baileys is JS-only, so Python pipes it the rendered
+# messages over stdin as JSON. WhatsApp's own per-message cap is huge (~65k), but
+# we chunk well below that to keep a group post readable.
+WHATSAPP_MAX_CHARS = 4000
+WHATSAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "whatsapp")
+WHATSAPP_SCRIPT = os.path.join(WHATSAPP_DIR, "send.js")
 
 EXACT_SCORE_TYPES = {"scores", "exact_score", "exact-score", "correct_score", "correctscore"}
 SCORELINE_RE = re.compile(r"^\s*\d+\s*[-–:]\s*\d+\s*$")          # "2-1", "0 - 0"
@@ -628,6 +641,106 @@ def send_telegram(session, messages, token, chat_id, parse_mode="HTML"):
             raise RuntimeError("Telegram API error: still rate-limited after 3 attempts")
 
 
+# --------------------------------------------------------------------------
+# WhatsApp (Baileys) rendering + sending
+#
+# WhatsApp has no HTML; it uses its own lightweight markup (*bold*, _italic_)
+# and auto-links bare URLs. So the WhatsApp blocks mirror the Telegram ones but
+# render plain text: no escaping, *…* for bold, and the Polymarket URL on its own
+# line instead of an inline anchor. The format-agnostic helpers (team flags,
+# score parsing, volume formatting, favoured side) are shared with Telegram.
+# --------------------------------------------------------------------------
+def _wa_team_label(name):
+    """Flag + Hebrew name (no HTML escaping — WhatsApp is plain text)."""
+    return f"{team_flag(name)} {team_he(name)}".strip()
+
+
+def format_game_whatsapp(game, top):
+    """One upcoming game as a Hebrew WhatsApp block, mirroring format_game_hebrew:
+    fixture + Israel-local kickoff, the most-likely scorelines each tagged with
+    the team they favour, then the bare Polymarket URL (WhatsApp auto-links it,
+    so there's no inline anchor like Telegram's)."""
+    concrete = specific_scores(game["scores"])                  # drop 'Any Other Score' before top-N
+    home, away = split_teams(game["title"])
+    lines = [f"*{_wa_team_label(home)} vs. {_wa_team_label(away)}* · {game['kickoff_il']}"]
+    for r in concrete[:top]:
+        prob = f"{r['yes_price'] * 100:.1f}%" if r["yes_price"] is not None else "—"
+        digits = score_digits(r["scoreline"])
+        sc = digits or "אחר"
+        fav = favored_team(home, away, r["scoreline"])
+        tag = team_he(fav) if fav else ("תיקו" if digits else "")
+        head = f"{sc} {tag}".strip()
+        lines.append(f"• {head} — {prob} · {_vol_compact(r['volume'])}")
+    lines.append(f"https://polymarket.com/event/{game['slug']}")
+    return "\n".join(lines)
+
+
+def format_results_whatsapp_body(results):
+    """Result lines (no header), mirroring format_results_body in WhatsApp text:
+    each team written next to its OWN goals so the score reads right under RTL."""
+    lines = []
+    for r in results:
+        home, away = split_teams(r["title"])
+        fh, fa = team_flag(home), team_flag(away)
+        nums = re.findall(r"\d+", r["score"]) if r["score"] else []
+        if len(nums) == 2:                                      # numeric scoreline known
+            hg, ag = nums
+            parts = [fh, f"{team_he(home)} {hg}", "-", f"{ag} {team_he(away)}", fa]
+            lines.append("• " + " ".join(filter(None, parts)))
+        else:                                                   # 'Any Other Score' won
+            lines.append(f"• {_wa_team_label(home)} vs. {_wa_team_label(away)} — תוצאה אחרת")
+    return "\n".join(lines)
+
+
+def whatsapp_blocks(games, results, top, hours):
+    """Assemble the full Hebrew WhatsApp message as blocks: recent results first
+    (carrying the brand), then the upcoming predictions — mirrors telegram_blocks."""
+    blocks = []
+    if results:
+        blocks.append(f"*{HE_BRAND} — {he_results_title(hours)}*\n"
+                      + format_results_whatsapp_body(results))
+    if games:
+        title = HE_PRED_TITLE if results else f"{HE_BRAND} — {HE_PRED_TITLE}"
+        blocks.append(f"*{title}*")
+        for g in games:
+            blocks.append(format_game_whatsapp(g, top))
+    return blocks
+
+
+def _run_whatsapp_node(command, payload=None, capture=True, timeout=120):
+    """Invoke the Baileys bridge (whatsapp/send.js <command>). `payload` is sent
+    as JSON on stdin. Returns the CompletedProcess. Raises RuntimeError with a
+    helpful message when Node or the bridge isn't set up. The bridge reads
+    WHATSAPP_NODE / WHATSAPP_AUTH_DIR from the (inherited) environment."""
+    node = os.environ.get("WHATSAPP_NODE") or "node"
+    if not os.path.exists(WHATSAPP_SCRIPT):
+        raise RuntimeError(
+            f"WhatsApp bridge not found at {WHATSAPP_SCRIPT}. Did you `cd {WHATSAPP_DIR} && npm install`?")
+    kwargs = {"timeout": timeout}
+    if capture:
+        kwargs.update(capture_output=True, text=True)
+    if payload is not None:
+        kwargs.update(input=json.dumps(payload), text=True)
+    try:
+        return subprocess.run([node, WHATSAPP_SCRIPT, command], **kwargs)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"Node.js executable '{node}' not found — install Node 18+ "
+            f"(or set WHATSAPP_NODE to its path).")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"WhatsApp '{command}' timed out after {timeout}s.")
+
+
+def send_whatsapp(messages, group_jid, timeout=120):
+    """Send each rendered message to a WhatsApp group via the Baileys bridge.
+    Surfaces the bridge's own stderr (e.g. 'run login first') on failure."""
+    proc = _run_whatsapp_node("send", payload={"jid": group_jid, "messages": messages},
+                              timeout=timeout)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"WhatsApp send failed: {err or f'exit {proc.returncode}'}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Polymarket World Cup exact-score odds for upcoming games.")
     ap.add_argument("--hours", type=float, default=24.0, help="Look-ahead window in hours (default 24).")
@@ -645,6 +758,18 @@ def main(argv=None):
     ap.add_argument("--test-telegram", action="store_true",
                     help="Send a single test message to verify the bot/chat wiring, then exit "
                          "(does not query Polymarket).")
+    ap.add_argument("--whatsapp", action="store_true",
+                    help="Also push the ranked output to a WhatsApp group via the Baileys bridge "
+                         "(reads WHATSAPP_GROUP_JID; pair once with --whatsapp-login).")
+    ap.add_argument("--test-whatsapp", action="store_true",
+                    help="Send a single test message to the WhatsApp group, then exit "
+                         "(does not query Polymarket).")
+    ap.add_argument("--whatsapp-login", action="store_true",
+                    help="Pair this machine with WhatsApp: prints a QR to scan from "
+                         "WhatsApp > Linked devices, then exit. Run once before --whatsapp.")
+    ap.add_argument("--whatsapp-groups", action="store_true",
+                    help="List the WhatsApp groups this device is in with their JIDs, then exit "
+                         "(use the JID as WHATSAPP_GROUP_JID).")
     default_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     ap.add_argument("--env-file", default=default_env, metavar="PATH",
                     help="Path to a .env file with secrets (default: .env next to this script).")
@@ -667,6 +792,38 @@ def main(argv=None):
                   f"(set them in {args.env_file} or the environment).", file=sys.stderr)
             return 2
 
+    wa_jid = None
+    if args.whatsapp or args.test_whatsapp:
+        wa_jid = os.environ.get("WHATSAPP_GROUP_JID")
+        if not wa_jid:
+            flag = "--test-whatsapp" if args.test_whatsapp else "--whatsapp"
+            print(f"ERROR: {flag} needs WHATSAPP_GROUP_JID "
+                  f"(set it in {args.env_file} or the environment; "
+                  f"run --whatsapp-groups to find it).", file=sys.stderr)
+            return 2
+
+    # WhatsApp pairing / discovery subcommands run the Node bridge and exit —
+    # they don't touch Polymarket. Pairing prints a QR, so inherit the terminal.
+    if args.whatsapp_login:
+        try:
+            proc = _run_whatsapp_node("login", capture=False, timeout=300)
+        except RuntimeError as exc:
+            print(f"WhatsApp login FAILED: {exc}", file=sys.stderr)
+            return 1
+        return proc.returncode
+
+    if args.whatsapp_groups:
+        try:
+            proc = _run_whatsapp_node("groups", timeout=120)
+        except RuntimeError as exc:
+            print(f"WhatsApp groups FAILED: {exc}", file=sys.stderr)
+            return 1
+        if proc.returncode != 0:
+            print((proc.stderr or proc.stdout or "").strip(), file=sys.stderr)
+            return 1
+        print(proc.stdout.strip() or "(no groups found)")
+        return 0
+
     session = requests.Session()
     session.headers.update({"User-Agent": "wc-exact-score/1.1"})
 
@@ -678,6 +835,15 @@ def main(argv=None):
             print(f"Telegram test FAILED: {exc}", file=sys.stderr)
             return 1
         print(f"Telegram test message sent to {tg_chat}. Check the channel.")
+        return 0
+
+    if args.test_whatsapp:
+        try:
+            send_whatsapp(["✅ *wc_exact_score* — WhatsApp wiring OK"], wa_jid)
+        except RuntimeError as exc:
+            print(f"WhatsApp test FAILED: {exc}", file=sys.stderr)
+            return 1
+        print(f"WhatsApp test message sent to {wa_jid}. Check the group.")
         return 0
 
     now = datetime.now(timezone.utc)
@@ -758,6 +924,17 @@ def main(argv=None):
             print(f"ERROR sending to Telegram: {exc}", file=sys.stderr)
             return 1
         print(f"Sent to Telegram in {len(messages)} message(s) "
+              f"({len(games)} upcoming, {len(results)} result(s)).")
+
+    if args.whatsapp:
+        wa_messages = pack_blocks(whatsapp_blocks(games, results, args.top, args.hours),
+                                  limit=WHATSAPP_MAX_CHARS)
+        try:
+            send_whatsapp(wa_messages, wa_jid)
+        except RuntimeError as exc:
+            print(f"ERROR sending to WhatsApp: {exc}", file=sys.stderr)
+            return 1
+        print(f"Sent to WhatsApp in {len(wa_messages)} message(s) "
               f"({len(games)} upcoming, {len(results)} result(s)).")
 
     return 0

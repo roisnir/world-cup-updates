@@ -1,0 +1,18 @@
+{
+  "name": "wc-whatsapp-sender",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Baileys bridge that posts World Cup exact-score updates to a WhatsApp group for wc_exact_score.py.",
+  "main": "send.js",
+  "scripts": {
+    "login": "node send.js login",
+    "groups": "node send.js groups"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

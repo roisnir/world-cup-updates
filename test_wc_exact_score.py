@@ -265,5 +265,89 @@ class FlowTest(unittest.TestCase):
         self.assertNotIn("Epsilon", out)                        # unresolved match not shown
 
 
+class WhatsAppTest(unittest.TestCase):
+    """The WhatsApp path renders the same data as plain WhatsApp markup and posts
+    through the Baileys bridge. We exercise the real rendering, and mock only the
+    subprocess boundary (the Node bridge) so no WhatsApp connection is needed."""
+
+    def setUp(self):
+        self.now = datetime.now(timezone.utc)
+        self.kick_future = iso(self.now + timedelta(hours=3))
+        self._real_run = wc.subprocess.run
+        self._real_session = wc.requests.Session
+        for k in ("WHATSAPP_GROUP_JID", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        wc.subprocess.run = self._real_run
+        wc.requests.Session = self._real_session
+        for k in ("WHATSAPP_GROUP_JID", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+            os.environ.pop(k, None)
+
+    # WhatsApp markup, not HTML: *bold* fixture, flags, Hebrew team names, the
+    # favoured-team tag on a scoreline, and the bare Polymarket URL (auto-linked,
+    # no <a> anchor). Mirrors the Telegram block, minus HTML.
+    def test_whatsapp_block_formatting(self):
+        upcoming = [exact_event("Netherlands vs. Sweden", "nl-se-exact-score", self.kick_future,
+                                [("Netherlands 2 - 1 Sweden", 0.30, 9000),
+                                 ("Netherlands 1 - 1 Sweden", 0.20, 1000)], closed=False)]
+        games = wc.build_games(upcoming, self.now, self.now + timedelta(hours=24))
+        block = wc.format_game_whatsapp(games[0], 5)
+        self.assertIn("🇳🇱", block)
+        self.assertIn("🇸🇪", block)
+        self.assertIn("*", block)                                # WhatsApp bold marker
+        self.assertNotIn("<b>", block)                           # no HTML
+        self.assertNotIn("</a>", block)                          # no HTML anchor
+        self.assertNotIn("הכי הרבה כסף", block)                  # money line dropped (matches Telegram)
+        self.assertIn("הולנד", block)                            # Hebrew team name
+        self.assertIn(wc.fmt_jerusalem(self.now + timedelta(hours=3)), block)
+        self.assertIn("2 - 1 הולנד", block)                      # scoreline tagged with favoured side
+        self.assertIn("https://polymarket.com/event/nl-se-exact-score", block)  # bare URL
+
+    # End-to-end --whatsapp run: the bridge is mocked, but real fetching, ranking
+    # and rendering run, and we assert on what got piped to the bridge.
+    def test_whatsapp_send_invokes_bridge(self):
+        upcoming = [exact_event("Alpha vs. Beta", "alpha-beta-exact-score", self.kick_future,
+                                [("Alpha 2 - 1 Beta", 0.30, 5000),
+                                 ("Alpha 1 - 1 Beta", 0.20, 9000)], closed=False)]
+        fake = FakeSession(upcoming, [])
+        wc.requests.Session = lambda: fake
+        os.environ["WHATSAPP_GROUP_JID"] = "123-456@g.us"
+
+        calls = []
+
+        class FakeProc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(cmd, **kw):
+            calls.append({"cmd": cmd, "input": kw.get("input")})
+            return FakeProc()
+
+        wc.subprocess.run = fake_run
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = wc.main(["--whatsapp", "--hours", "24", "--no-results",
+                          "--env-file", "/nonexistent/.env"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1, "the bridge should be invoked exactly once")
+        self.assertEqual(calls[0]["cmd"][-1], "send")            # `node send.js send`
+        payload = json.loads(calls[0]["input"])
+        self.assertEqual(payload["jid"], "123-456@g.us")
+        text = "\n".join(payload["messages"])
+        self.assertIn("מונדיאל", text)                           # Hebrew header
+        self.assertIn("Alpha vs. Beta", text)
+        self.assertIn("https://polymarket.com/event/alpha-beta-exact-score", text)
+
+    # A missing JID is a hard, early error (before any network call).
+    def test_whatsapp_requires_jid(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = wc.main(["--whatsapp", "--env-file", "/nonexistent/.env"])
+        self.assertEqual(rc, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
