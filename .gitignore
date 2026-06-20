@@ -8,3 +8,8 @@ __pycache__/
 # Local run artifacts
 wc.log
 results.json
+
+# WhatsApp (Baileys) bridge — node deps and the linked-device credentials.
+# auth/ is as sensitive as a password: anyone with it can post as your account.
+whatsapp/node_modules/
+whatsapp/auth/

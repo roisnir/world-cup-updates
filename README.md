@@ -73,6 +73,58 @@ HTML-formatted and chunked to respect Telegram's 4096-char limit (a game is neve
 split across messages). When there are no upcoming games and no recent results,
 nothing is sent — a scheduled run stays quiet until there is something to report.
 
+## WhatsApp alerts (Baileys)
+
+The same Hebrew update can also be posted to a **WhatsApp group**, in parallel to
+Telegram. WhatsApp has no bot API for groups, so this uses
+[Baileys](https://github.com/WhiskeySockets/Baileys) (the WhatsApp Web
+multi-device library) through a tiny Node.js bridge in [`whatsapp/`](whatsapp/).
+Python shells out to it; Node is only needed for this feature.
+
+One-time setup:
+
+1. Install Node 18+ and the bridge's dependencies:
+   ```bash
+   cd whatsapp && npm install && cd ..
+   ```
+2. **Pair** the machine with your WhatsApp account (like linking WhatsApp Web).
+   This prints a QR — scan it from your phone under
+   *WhatsApp → Linked devices → Link a device*:
+   ```bash
+   python wc_exact_score.py --whatsapp-login
+   ```
+   Credentials are saved under `whatsapp/auth/` (gitignored). Treat that folder
+   like a password — anyone with it can post as your account.
+3. Find your group's **JID** and put it in `.env`:
+   ```bash
+   python wc_exact_score.py --whatsapp-groups   # lists groups: [{ "jid": "...@g.us", "name": ... }]
+   ```
+   ```
+   WHATSAPP_GROUP_JID=123456789-123456@g.us
+   ```
+
+Verify the wiring (sends one test message, doesn't touch Polymarket):
+
+```bash
+python wc_exact_score.py --test-whatsapp
+```
+
+Then send real updates — combine with `--telegram` to post to both at once:
+
+```bash
+python wc_exact_score.py --whatsapp --hours 2
+python wc_exact_score.py --telegram --whatsapp --hours 2
+```
+
+The WhatsApp message carries the same content as Telegram, rendered in WhatsApp
+markup (`*bold*`, bare auto-linked Polymarket URLs) instead of HTML. As with
+Telegram, nothing is sent when there are no upcoming games and no recent results.
+
+Notes for cron: the bridge needs Node on `PATH` — set `WHATSAPP_NODE=/usr/bin/node`
+(from `which node`) in `.env` if it isn't. Override the credentials location with
+`WHATSAPP_AUTH_DIR=/abs/path`. Each run connects, posts, and disconnects, so the
+phone need not be online once paired (multi-device works offline).
+
 ## Tests
 
 Whole-flow tests mock only the network boundary (HTTP get/post) and run the real
